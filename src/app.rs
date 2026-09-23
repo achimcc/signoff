@@ -6,6 +6,7 @@ use crate::config::{Config, Service};
 use crate::runner::{Runner, System};
 use crate::verdict::{Finding, Summary, Verdict, format_line};
 use std::io::Write;
+use std::path::Path;
 
 pub const RULES: &str = "\
 signoff asks, per service, whether it is really done. Seven measurements:
@@ -67,28 +68,12 @@ pub fn main(argv: &[String]) -> i32 {
                     return 2;
                 }
             };
-            let selected: Vec<&Service> = if all {
-                cfg.service.iter().collect()
-            } else {
-                let mut v = Vec::new();
-                for key in &services {
-                    match cfg.service(key) {
-                        Some(s) => v.push(s),
-                        None => {
-                            eprintln!(
-                                "signoff: no service {key:?} in {} (known: {})",
-                                args.config.display(),
-                                cfg.service
-                                    .iter()
-                                    .map(|s| s.key.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                            return 2;
-                        }
-                    }
+            let selected = match select(&cfg, &services, all, &args.config) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("signoff: {e}");
+                    return 2;
                 }
-                v
             };
             let mut out = std::io::stdout().lock();
             if is_plan {
@@ -99,6 +84,38 @@ pub fn main(argv: &[String]) -> i32 {
             }
         }
     }
+}
+
+/// All services when `all`, else exactly the named ones, in order — or an
+/// error naming the one that is not declared and everything that is, so
+/// the message stays useful without a second look at the config file.
+fn select<'a>(
+    cfg: &'a Config,
+    services: &[String],
+    all: bool,
+    config_path: &Path,
+) -> Result<Vec<&'a Service>, String> {
+    if all {
+        return Ok(cfg.service.iter().collect());
+    }
+    let mut v = Vec::new();
+    for key in services {
+        match cfg.service(key) {
+            Some(s) => v.push(s),
+            None => {
+                return Err(format!(
+                    "no service {key:?} in {} (known: {})",
+                    config_path.display(),
+                    cfg.service
+                        .iter()
+                        .map(|s| s.key.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    Ok(v)
 }
 
 fn emit(out: &mut dyn Write, findings: &mut Vec<Finding>, f: Finding) {
@@ -584,5 +601,47 @@ mod tests {
         assert_eq!(main(&["rules".into()]), 0);
         assert_eq!(main(&["--version".into()]), 0);
         assert_eq!(main(&["bogus".into()]), 2);
+    }
+
+    #[test]
+    fn main_names_the_known_services_for_an_unknown_one() {
+        // A real config, loaded fine, but a service key it does not
+        // declare: exit 2 by way of the unknown-service branch, not the
+        // missing-config one above.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/answers/signoff.toml");
+        assert_eq!(
+            main(&[
+                "--config".into(),
+                path.into(),
+                "check".into(),
+                "nosuchservice".into()
+            ]),
+            2
+        );
+    }
+
+    #[test]
+    fn select_names_the_unknown_service_and_every_known_one() {
+        let c = cfg();
+        let e = select(
+            &c,
+            &["nosuchservice".to_string()],
+            false,
+            std::path::Path::new("/etc/signoff.toml"),
+        )
+        .unwrap_err();
+        assert!(e.contains("nosuchservice"), "{e}");
+        assert!(e.contains("/etc/signoff.toml"), "{e}");
+        assert!(e.contains("known: ghostfolio, radarr, start"), "{e}");
+    }
+
+    #[test]
+    fn select_all_returns_every_service_in_declared_order() {
+        let c = cfg();
+        let v = select(&c, &[], true, std::path::Path::new("/etc/signoff.toml")).unwrap();
+        assert_eq!(
+            v.iter().map(|s| s.key.as_str()).collect::<Vec<_>>(),
+            vec!["ghostfolio", "radarr", "start"]
+        );
     }
 }

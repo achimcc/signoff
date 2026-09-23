@@ -106,7 +106,31 @@ path = "/api/auth/token"
 content_type = "application/x-www-form-urlencoded"
 body = "username=changeme%40example.com&password=MyPassword"
 reject = [401, 403]
+
+[[service]]
+key = "radarr"
+host = "radarr.rusty-vault.de"
+guest = "media-01"
+public = false
+backend = "10.0.10.10:7878"
+backend_guest = "media-01"
+forward_auth = false
+dataset = "rpool/guests/media-01"
+
+[[service]]
+key = "start"
+host = "rusty-vault.de"
+guest = "infra-01"
+public = true
+forward_auth = true
+dataset = "rpool/guests/infra-01"
 ```
+
+(This is the full `tests/answers/signoff.toml` fixture the test suite uses,
+shown here so every service referenced elsewhere in this README —
+`ghostfolio`, `radarr`, `start` — resolves to a real block. `radarr` shows
+an internal-only service with a backend but no `factory_login`; `start`
+shows a public, forward-auth service with no `backend` at all.)
 
 - `zone` — the DNS zone the service names live under; also the domain
   `public-path`'s canary invents a name in.
