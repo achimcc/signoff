@@ -1,0 +1,16 @@
+[package]
+name = "signoff"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+description = "Is the service really done? Live acceptance checks for a self-hosted service"
+repository = "https://github.com/achimcc/signoff"
+
+[dependencies]
+lexopt = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[profile.release]
+lto = true
