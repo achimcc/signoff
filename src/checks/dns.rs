@@ -18,14 +18,6 @@ pub fn args(resolver: &str, rrtype: &str, name: &str) -> Vec<String> {
     ]
 }
 
-fn looks_like_address(line: &str) -> bool {
-    !line.is_empty()
-        && line
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() || c == '.' || c == ':')
-        && (line.contains(':') || line.chars().filter(|c| *c == '.').count() == 3)
-}
-
 pub fn judge(out: &Output, rrtype: &str, expected: &str) -> Verdict {
     if out.code != Some(0) {
         return Verdict::CannotMeasure(format!(
@@ -38,7 +30,7 @@ pub fn judge(out: &Output, rrtype: &str, expected: &str) -> Verdict {
         .stdout
         .lines()
         .map(str::trim)
-        .filter(|l| looks_like_address(l))
+        .filter(|l| l.parse::<std::net::IpAddr>().is_ok())
         .collect();
     if addresses.contains(&expected) {
         return Verdict::Ok(expected.into());
@@ -153,7 +145,11 @@ mod tests {
     #[test]
     fn empty_answer_is_a_finding_and_resolver_failure_is_cannot_measure() {
         assert_eq!(
-            judge(&out("", 0), "AAAA", "2a01::1"),
+            judge(
+                &out(include_str!("../../tests/answers/dig-empty.txt"), 0),
+                "AAAA",
+                "2a01::1"
+            ),
             Verdict::Failed("no AAAA record".into())
         );
         let v = judge(
@@ -166,6 +162,18 @@ mod tests {
             "x",
         );
         assert!(matches!(v, Verdict::CannotMeasure(_)));
+    }
+
+    #[test]
+    fn hex_hostname_is_not_an_address() {
+        let v = judge(
+            &out("abcd.badface.de.\n77.42.71.141\n", 0),
+            "A",
+            "77.42.71.141",
+        );
+        assert_eq!(v, Verdict::Ok("77.42.71.141".into()));
+        let v = judge(&out("abcd.badface.de.\n", 0), "A", "77.42.71.141");
+        assert_eq!(v, Verdict::Failed("no A record".into()));
     }
 
     #[test]
