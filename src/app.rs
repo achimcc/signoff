@@ -33,9 +33,16 @@ Verdicts:
                    no forward_auth) — never changes the exit code
   undeclared       factory-login only: nobody declared a probe — a hint, not green
 
+  public-path: curl exit 60/51 (certificate not verifiable, name not in the
+  certificate) is a finding about the service, not \"cannot measure\"
+
 Controls, once per run, before any measurement (exit 2 if one fails):
   the resolver answers SOA for the zone; an invented name is refused by the
   VPS (else a 200 proves nothing); the backup repository lists snapshots at all.
+And once, at the first service with forward_auth (a run without one never
+fetches a token): authentik lists at least one proxy provider — an empty
+list means the token may see none, not that every service lacks one. The
+run stops there with exit 2; lines already printed stay, no summary follows.
 ";
 
 pub fn main(argv: &[String]) -> i32 {
@@ -147,7 +154,9 @@ pub fn check(
             return 2;
         }
     }
-    let mut auth: Option<Result<outpost::Auth, String>> = None;
+    // Fetched at the first forward-auth service, then reused: one token,
+    // one provider list, one outpost list per run.
+    let mut authentik: Option<Result<outpost::Authentik, String>> = None;
     let mut findings = Vec::new();
     for s in services {
         let key = s.key.clone();
@@ -175,9 +184,22 @@ pub fn check(
         let outpost_verdict = if !s.forward_auth {
             Verdict::NotApplicable("no forward_auth".into())
         } else {
-            let a = auth.get_or_insert_with(|| outpost::Auth::fetch(r, cfg));
-            match a {
-                Ok(a) => outpost::check(r, cfg, s, a),
+            let fetched = match authentik {
+                Some(ref a) => a,
+                None => authentik.insert(match outpost::Authentik::fetch(r, cfg) {
+                    Ok(a) => Ok(a),
+                    Err(outpost::Unavailable::Measure(e)) => Err(e),
+                    // The fourth control runs late — only a run with a
+                    // forward-auth service fetches a token — but ends the
+                    // run the same way as the other three.
+                    Err(outpost::Unavailable::Control(e)) => {
+                        eprintln!("signoff: control failed: {e}");
+                        return 2;
+                    }
+                }),
+            };
+            match fetched {
+                Ok(a) => outpost::check(cfg, s, a),
                 Err(e) => Verdict::CannotMeasure(e.clone()),
             }
         };
@@ -242,6 +264,18 @@ pub fn plan(cfg: &Config, services: &[&Service], out: &mut dyn Write) {
                 format!(
                     "vantage {}",
                     backend::args(&cfg.caddy_guest, g, p).join(" ")
+                ),
+            ),
+            // Same verdict as `check` would give: a backend that belongs to
+            // no declared guest cannot be probed.
+            (None, Some(_)) => row(
+                out,
+                s,
+                "backend",
+                format!(
+                    "{:<16} backend {} is not a declared guest",
+                    "cannot measure",
+                    s.backend.as_deref().unwrap_or("?")
                 ),
             ),
             _ => row(out, s, "backend", na("no backend")),
@@ -320,7 +354,12 @@ mod tests {
     }
     /// A host where everything is in order.
     fn healthy() -> Fake {
-        Fake::new()
+        healthy_after(Fake::new())
+    }
+    /// The healthy host behind the rules already in `first` — rules are
+    /// first-match-wins, so `first` overrides what a healthy host says.
+    fn healthy_after(first: Fake) -> Fake {
+        first
             .on(
                 "dig",
                 "SOA rusty-vault.de",
@@ -450,6 +489,53 @@ mod tests {
             .filter(|(_, a, _)| a.join(" ").contains("authentik-kurztoken"))
             .count();
         assert_eq!(fetches, 1);
+    }
+
+    #[test]
+    fn providers_and_outposts_are_fetched_once_for_all_services() {
+        let c = cfg();
+        let fake = healthy();
+        let all: Vec<&crate::config::Service> = c.service.iter().collect();
+        let mut buf = Vec::new();
+        check(&fake, &c, &all, noon(), &mut buf);
+        for what in ["providers/proxy", "outposts/instances"] {
+            let n = fake
+                .calls()
+                .iter()
+                .filter(|(_, a, stdin)| {
+                    a.join(" ").contains(what)
+                        || stdin
+                            .as_ref()
+                            .is_some_and(|s| String::from_utf8_lossy(s).contains(what))
+                })
+                .count();
+            assert_eq!(n, 1, "{what}");
+        }
+    }
+
+    #[test]
+    fn an_empty_provider_list_is_a_failed_control_not_a_finding() {
+        let c = cfg();
+        let fake = healthy_after(Fake::new().on(
+            "systemd-run",
+            "providers/proxy",
+            out(0, r#"{"pagination":{"count":0},"results":[]}"#, ""),
+        ));
+        let mut buf = Vec::new();
+        let code = check(
+            &fake,
+            &c,
+            &[
+                c.service("radarr").unwrap(),
+                c.service("ghostfolio").unwrap(),
+            ],
+            noon(),
+            &mut buf,
+        );
+        let text = String::from_utf8(buf).unwrap();
+        assert_eq!(code, 2, "{text}");
+        assert!(!text.contains("failed"), "{text}");
+        assert!(!text.contains("ghostfolio      outpost"), "{text}");
     }
 
     #[test]
@@ -587,6 +673,24 @@ mod tests {
     }
 
     #[test]
+    fn plan_says_cannot_measure_for_a_backend_outside_every_guest_like_check() {
+        let c = parse(
+            &include_str!("../tests/answers/signoff.toml")
+                .replace("backend_guest = \"fin-01\"\n", ""),
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        plan(&c, &[c.service("ghostfolio").unwrap()], &mut buf);
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains(
+                "ghostfolio      backend         cannot measure   backend 10.0.190.10:3333 is not a declared guest"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn main_reports_an_unknown_service_and_a_missing_config() {
         // No config file at this path: exit 2 with the path in the message.
         assert_eq!(
@@ -601,6 +705,7 @@ mod tests {
         assert_eq!(main(&["rules".into()]), 0);
         assert_eq!(main(&["--version".into()]), 0);
         assert_eq!(main(&["bogus".into()]), 2);
+        assert_eq!(main(&["rules".into(), "extra".into()]), 2);
     }
 
     #[test]

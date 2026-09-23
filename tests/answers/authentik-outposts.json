@@ -1,8 +1,135 @@
 {
-  "pagination": {"next": 0, "previous": 0, "count": 2, "current": 1, "total_pages": 1, "start_index": 1, "end_index": 2},
+  "pagination": {
+    "next": 0,
+    "previous": 0,
+    "count": 2,
+    "current": 1,
+    "total_pages": 1,
+    "start_index": 1,
+    "end_index": 2
+  },
   "results": [
-    {"pk": "6d9b2a1c-0000-4000-8000-000000000001", "name": "LDAP-Outpost", "type": "ldap", "providers": [3], "providers_obj": [{"pk": 3, "name": "LDAP"}]},
-    {"pk": "6d9b2a1c-0000-4000-8000-000000000002", "name": "authentik Embedded Outpost", "type": "proxy", "providers": [17, 5], "providers_obj": [{"pk": 17, "name": "Ghostfolio (Forward-Auth)"}, {"pk": 5, "name": "Einstiegsseite (Forward-Auth)"}]}
+    {
+      "pk": "86aeee8b-9988-4f67-a13b-039af3f3d522",
+      "name": "authentik Embedded Outpost",
+      "providers": [
+        104,
+        105,
+        91,
+        94,
+        153,
+        92,
+        126,
+        100,
+        84,
+        144,
+        93,
+        112,
+        136,
+        90,
+        98,
+        68,
+        149,
+        76,
+        82,
+        74
+      ],
+      "providers_obj": [
+        {
+          "pk": 104,
+          "name": "Blog (Forward-Auth)"
+        },
+        {
+          "pk": 105,
+          "name": "Forum (Forward-Auth)"
+        },
+        {
+          "pk": 91,
+          "name": "Sonarr (Forward-Auth)"
+        },
+        {
+          "pk": 94,
+          "name": "qBittorrent (Forward-Auth)"
+        },
+        {
+          "pk": 153,
+          "name": "Dispatcharr (Forward-Auth)"
+        },
+        {
+          "pk": 92,
+          "name": "Prowlarr (Forward-Auth)"
+        },
+        {
+          "pk": 126,
+          "name": "Ghostfolio (Forward-Auth)"
+        },
+        {
+          "pk": 100,
+          "name": "pyLoad (Forward-Auth)"
+        },
+        {
+          "pk": 84,
+          "name": "Lidarr (Forward-Auth)"
+        },
+        {
+          "pk": 144,
+          "name": "Open WebUI (Forward-Auth)"
+        },
+        {
+          "pk": 93,
+          "name": "SABnzbd (Forward-Auth)"
+        },
+        {
+          "pk": 112,
+          "name": "Bazarr (Forward-Auth)"
+        },
+        {
+          "pk": 136,
+          "name": "SuggestArr (Forward-Auth)"
+        },
+        {
+          "pk": 90,
+          "name": "Radarr (Forward-Auth)"
+        },
+        {
+          "pk": 98,
+          "name": "Trailarr (Forward-Auth)"
+        },
+        {
+          "pk": 68,
+          "name": "Grafana (Forward-Auth)"
+        },
+        {
+          "pk": 149,
+          "name": "slskd (Forward-Auth)"
+        },
+        {
+          "pk": 76,
+          "name": "Dateien (Forward-Auth)"
+        },
+        {
+          "pk": 82,
+          "name": "Streamystats (Forward-Auth)"
+        },
+        {
+          "pk": 74,
+          "name": "Einstiegsseite (Forward-Auth)"
+        }
+      ]
+    },
+    {
+      "pk": "ce93ac4d-e869-4323-abcc-4047d7daf92f",
+      "name": "LDAP-Outpost",
+      "providers": [
+        40
+      ],
+      "providers_obj": [
+        {
+          "pk": 40,
+          "name": "LDAP"
+        }
+      ]
+    }
   ],
   "autocomplete": {}
 }

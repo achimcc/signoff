@@ -83,7 +83,8 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             let (services, all) = selection(services, all)?;
             Cmd::Plan { services, all }
         }
-        Some("rules") => Cmd::Rules,
+        Some("rules") if services.is_empty() && !all => Cmd::Rules,
+        Some("rules") => return Err("rules takes no arguments".into()),
         Some(other) => return Err(format!("unknown command {other:?}")),
         None => return Err("no command".into()),
     };
@@ -143,6 +144,8 @@ mod tests {
         assert_eq!(p(&["--help"]).unwrap().cmd, Cmd::Help);
         assert_eq!(p(&["--version"]).unwrap().cmd, Cmd::Version);
         assert!(p(&["frobnicate"]).is_err());
+        assert!(p(&["rules", "extra"]).unwrap_err().contains("no arguments"));
+        assert!(p(&["rules", "--all"]).unwrap_err().contains("no arguments"));
         assert!(p(&[]).is_err());
     }
 }

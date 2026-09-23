@@ -10,10 +10,65 @@ use crate::guest;
 use crate::runner::Runner;
 use crate::verdict::Verdict;
 use serde_json::Value;
+use std::fmt;
 
-#[derive(Debug)]
 pub struct Auth {
     pub token: String,
+}
+
+/// Hand-written, not derived: a derived `Debug` would print the token into
+/// any `{:?}` — a panic message, a log line, a test failure.
+impl fmt::Debug for Auth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Auth")
+            .field("token", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Why the provider and outpost lists are not there.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unavailable {
+    /// The positive control failed: the answer came, but it cannot be
+    /// true (no proxy providers at all). The run says nothing — exit 2.
+    Control(String),
+    /// The path to the answer did not carry (token, curl, JSON): every
+    /// forward-auth service gets `cannot measure`.
+    Measure(String),
+}
+
+/// Providers and outposts, fetched once per run — they do not change
+/// between two services, and one token serves both requests.
+#[derive(Debug)]
+pub struct Authentik {
+    pub providers: Value,
+    pub outposts: Value,
+}
+
+impl Authentik {
+    pub fn fetch(r: &dyn Runner, cfg: &Config) -> Result<Authentik, Unavailable> {
+        let auth = Auth::fetch(r, cfg).map_err(Unavailable::Measure)?;
+        let providers = providers(r, cfg, &auth).map_err(Unavailable::Measure)?;
+        control_providers(&providers).map_err(Unavailable::Control)?;
+        let outposts = outposts(r, cfg, &auth).map_err(Unavailable::Measure)?;
+        Ok(Authentik {
+            providers,
+            outposts,
+        })
+    }
+}
+
+/// Authentik filters every list by object permissions. A token that may
+/// see no provider gets an empty list with 200 — and without this control
+/// every forward-auth service would read `failed: no proxy provider`, a
+/// finding about the services that is really one about the token.
+pub fn control_providers(providers: &Value) -> Result<(), String> {
+    match results(providers) {
+        Some(list) if list.is_empty() => {
+            Err("authentik lists no proxy providers at all (permissions of the token?)".into())
+        }
+        _ => Ok(()),
+    }
 }
 
 impl Auth {
@@ -122,15 +177,11 @@ pub fn judge(providers: &Value, outposts: &Value, host: &str, outpost_name: &str
     }
 }
 
-pub fn check(r: &dyn Runner, cfg: &Config, s: &Service, auth: &Auth) -> Verdict {
+pub fn check(cfg: &Config, s: &Service, a: &Authentik) -> Verdict {
     if !s.forward_auth {
         return Verdict::NotApplicable("no forward_auth".into());
     }
-    let (p, o) = match (providers(r, cfg, auth), outposts(r, cfg, auth)) {
-        (Ok(p), Ok(o)) => (p, o),
-        (Err(e), _) | (_, Err(e)) => return Verdict::CannotMeasure(e),
-    };
-    judge(&p, &o, &s.host, &cfg.outpost)
+    judge(&a.providers, &a.outposts, &s.host, &cfg.outpost)
 }
 
 #[cfg(test)]
@@ -168,7 +219,7 @@ mod tests {
         assert_eq!(
             v,
             Verdict::Ok(
-                "provider 17 \"Ghostfolio (Forward-Auth)\" attached to authentik Embedded Outpost"
+                "provider 126 \"Ghostfolio (Forward-Auth)\" attached to authentik Embedded Outpost"
                     .into()
             )
         );
@@ -192,25 +243,41 @@ mod tests {
 
     #[test]
     fn provider_not_attached_to_the_outpost_is_a_finding() {
-        let v = judge(
-            &json(PROVIDERS),
-            &json(OUTPOSTS),
-            "stats.rusty-vault.de",
-            OUTPOST,
-        );
-        assert_eq!(v, Verdict::Failed("provider 9 \"Grafana (Forward-Auth)\" is not attached to outpost \"authentik Embedded Outpost\"".into()));
+        // On the real host every proxy provider is attached; detach one.
+        let mut o = json(OUTPOSTS);
+        for inst in o["results"].as_array_mut().unwrap() {
+            if inst["name"] == OUTPOST {
+                inst["providers"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|p| p.as_i64() != Some(82));
+            }
+        }
+        let v = judge(&json(PROVIDERS), &o, "stats.rusty-vault.de", OUTPOST);
+        assert_eq!(v, Verdict::Failed("provider 82 \"Streamystats (Forward-Auth)\" is not attached to outpost \"authentik Embedded Outpost\"".into()));
+        // ... and attached as recorded, it is ok.
+        assert!(matches!(
+            judge(
+                &json(PROVIDERS),
+                &json(OUTPOSTS),
+                "stats.rusty-vault.de",
+                OUTPOST
+            ),
+            Verdict::Ok(_)
+        ));
     }
 
     #[test]
     fn two_providers_for_one_host_is_a_finding() {
         let mut p = json(PROVIDERS);
         p["results"].as_array_mut().unwrap().push(serde_json::json!({"pk": 40, "name": "Ghostfolio (Kopie)", "external_host": "https://ghostfolio.rusty-vault.de"}));
-        p["pagination"]["count"] = serde_json::json!(4);
+        let n = p["results"].as_array().unwrap().len();
+        p["pagination"]["count"] = serde_json::json!(n);
         let v = judge(&p, &json(OUTPOSTS), "ghostfolio.rusty-vault.de", OUTPOST);
         assert_eq!(
             v,
             Verdict::Failed(
-                "2 proxy providers with external_host https://ghostfolio.rusty-vault.de: 17, 40"
+                "2 proxy providers with external_host https://ghostfolio.rusty-vault.de: 126, 40"
                     .into()
             )
         );
@@ -283,12 +350,53 @@ mod tests {
     #[test]
     fn check_skips_services_without_forward_auth() {
         let c = cfg();
-        let fake = Fake::new();
-        let auth = Auth { token: "t".into() };
+        let a = Authentik {
+            providers: json(PROVIDERS),
+            outposts: json(OUTPOSTS),
+        };
         assert_eq!(
-            check(&fake, &c, c.service("radarr").unwrap(), &auth),
+            check(&c, c.service("radarr").unwrap(), &a),
             Verdict::NotApplicable("no forward_auth".into())
         );
-        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn debug_never_shows_the_token() {
+        let auth = Auth {
+            token: "ak-secret-token".into(),
+        };
+        let shown = format!("{auth:?}");
+        assert!(!shown.contains("ak-secret-token"), "{shown}");
+        assert!(shown.contains("<redacted>"), "{shown}");
+    }
+
+    #[test]
+    fn empty_provider_list_fails_the_control_not_the_services() {
+        let c = cfg();
+        let empty = r#"{"pagination":{"count":0},"results":[]}"#;
+        let fake = Fake::new()
+            .on("systemd-run", "authentik-kurztoken", out(0, "tok\n", ""))
+            .on("systemd-run", "providers/proxy", out(0, empty, ""))
+            .on("systemd-run", "outposts/instances", out(0, OUTPOSTS, ""));
+        assert_eq!(
+            Authentik::fetch(&fake, &c).unwrap_err(),
+            Unavailable::Control(
+                "authentik lists no proxy providers at all (permissions of the token?)".into()
+            )
+        );
+        assert!(control_providers(&json(PROVIDERS)).is_ok());
+        // No `results` at all is not the control's business: judge says
+        // cannot measure for that.
+        assert!(control_providers(&json("{}")).is_ok());
+    }
+
+    #[test]
+    fn fetch_errors_are_measure_errors() {
+        let c = cfg();
+        let silent = Fake::new().on("systemd-run", "authentik-kurztoken", out(0, "", ""));
+        assert!(matches!(
+            Authentik::fetch(&silent, &c).unwrap_err(),
+            Unavailable::Measure(e) if e.contains("authentik-kurztoken")
+        ));
     }
 }

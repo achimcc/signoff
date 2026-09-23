@@ -35,6 +35,12 @@ pub fn judge(out: &Output, vps_v4: &str) -> Verdict {
             "TLS handshake rejected by the VPS default vhost (unrecognized name): the name is not in the SNI map — just deploy-vps?".into(),
         ),
         Some(35) => Verdict::Failed(format!("TLS error: {}", first_line(&out.stderr))),
+        // 60: the certificate cannot be verified, 51: it does not name the
+        // host. The path carried — what came back is wrong: a finding.
+        Some(code @ (51 | 60)) => Verdict::Failed(format!(
+            "TLS certificate problem (curl exit {code}): {}",
+            first_line(&out.stderr)
+        )),
         Some(code) => Verdict::CannotMeasure(format!("curl exit {code}: {}", first_line(&out.stderr))),
         None => Verdict::CannotMeasure("curl killed by a signal".into()),
     }
@@ -138,6 +144,25 @@ mod tests {
             v,
             Verdict::Failed("TLS error: curl: (35) alert handshake failure".into())
         );
+    }
+
+    #[test]
+    fn certificate_problems_are_findings_not_cannot_measure() {
+        for (code, msg) in [
+            (
+                60,
+                "curl: (60) SSL certificate problem: self-signed certificate",
+            ),
+            (
+                51,
+                "curl: (51) SSL: no alternative certificate subject name matches target hostname 'x.rusty-vault.de'",
+            ),
+        ] {
+            assert_eq!(
+                judge(&out(code, "000", msg), "77.42.71.141"),
+                Verdict::Failed(format!("TLS certificate problem (curl exit {code}): {msg}"))
+            );
+        }
     }
 
     #[test]

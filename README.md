@@ -36,7 +36,7 @@ need either one or more service keys or `--all`, never both.
 | Check | How | Only when |
 |---|---|---|
 | `dns-a`, `dns-aaaa` | `dig @<resolver>`: the name must resolve to the VPS — the zone carries a wildcard, so "some record" proves nothing | `public` |
-| `public-path` | `curl --resolve <host>:443:<vps>`: any HTTP status is ok, the home proxy answered; curl exit 35 "unrecognized name" means the VPS's default vhost refused — the name is not in the SNI map | `public` |
+| `public-path` | `curl --resolve <host>:443:<vps>`: any HTTP status is ok, the home proxy answered; curl exit 35 "unrecognized name" means the VPS's default vhost refused — the name is not in the SNI map; curl exit 60/51 (certificate not verifiable, host not in the certificate) is a finding too, not `cannot measure` | `public` |
 | `backend` | `vantage probe --from <proxy guest> <guest>:<port>`: `answered` is ok; `refused` / `dropped at zone edge` / `dropped elsewhere` are findings | a `backend` and `backend_guest` are declared |
 | `outpost` | a proxy provider with `external_host https://<host>` exists and the embedded outpost carries it | `forward_auth` |
 | `backup` | the newest rustic snapshot for the guest's dataset is younger than `snapshot_max_age_hours` | always |
@@ -60,7 +60,7 @@ ghostfolio      dns-a           ok               77.42.71.141
 ghostfolio      dns-aaaa        ok               2a01:4f9:c013:5ee7::1
 ghostfolio      public-path     ok               HTTP 302 via 77.42.71.141
 ghostfolio      backend         ok               answered 301 (infra-01 -> fin-01:3333)
-ghostfolio      outpost         ok               provider 17 "Ghostfolio (Forward-Auth)" attached to authentik Embedded Outpost
+ghostfolio      outpost         ok               provider 126 "Ghostfolio (Forward-Auth)" attached to authentik Embedded Outpost
 ghostfolio      backup          ok               newest 2026-09-23T04:40:35.297023632+02:00, 5 h old (2 snapshots)
 ghostfolio      factory-login   ok               HTTP 401: factory account rejected
 7 ok, 0 failed, 0 n/a, 0 undeclared, 0 cannot measure
@@ -173,7 +173,7 @@ shows a public, forward-auth service with no `backend` at all.)
 ## Controls
 
 Before any per-service measurement, `check` runs three controls once per
-invocation. If any of them fails, `check` prints `signoff: control failed:
+invocation (a fourth follows at the first forward-auth service, see below). If any of them fails, `check` prints `signoff: control failed:
 …` to stderr, returns exit 2, and takes no measurement at all — a red
 `dig`/`curl`/`rustic` run for one service would otherwise look like a
 finding about the network, not about the service.
@@ -187,6 +187,17 @@ finding about the network, not about the service.
 3. **Repository** — `rustic snapshots` lists something at all, for any
    dataset. Otherwise "no snapshot for `<dataset>`" would be a statement
    about a broken repository, not about that one guest.
+4. **Proxy providers** — Authentik lists at least one proxy provider.
+   Authentik filters every list by the token's object permissions: a
+   token that may see none gets an empty list with HTTP 200, and without
+   this control every forward-auth service would read `failed: no proxy
+   provider` — a finding about the services that is really one about the
+   token. This control runs late, at the first service with
+   `forward_auth` (a run without one never fetches a token), but ends the
+   run the same way: `signoff: control failed: authentik lists no proxy
+   providers at all (permissions of the token?)`, exit 2. Lines already
+   printed stay; no summary follows. Providers and outposts are fetched
+   once per run, not once per service.
 
 ## Exit codes
 
