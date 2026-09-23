@@ -1,0 +1,45 @@
+zone = "rusty-vault.de"
+resolver = "1.1.1.1"
+vps_v4 = "77.42.71.141"
+vps_v6 = "2a01:4f9:c013:5ee7::1"
+caddy_guest = "infra-01"
+auth_guest = "auth-01"
+auth_api = "http://127.0.0.1:9000/api/v3"
+outpost = "authentik Embedded Outpost"
+rustic_profile = "/etc/rustic/rustic"
+snapshot_max_age_hours = 48
+
+[[service]]
+key = "ghostfolio"
+host = "ghostfolio.rusty-vault.de"
+guest = "fin-01"
+public = true
+backend = "10.0.190.10:3333"
+backend_guest = "fin-01"
+forward_auth = true
+dataset = "rpool/guests/fin-01"
+
+[service.factory_login]
+method = "POST"
+path = "/api/auth/token"
+content_type = "application/x-www-form-urlencoded"
+body = "username=changeme%40example.com&password=MyPassword"
+reject = [401, 403]
+
+[[service]]
+key = "radarr"
+host = "radarr.rusty-vault.de"
+guest = "media-01"
+public = false
+backend = "10.0.10.10:7878"
+backend_guest = "media-01"
+forward_auth = false
+dataset = "rpool/guests/media-01"
+
+[[service]]
+key = "start"
+host = "rusty-vault.de"
+guest = "infra-01"
+public = true
+forward_auth = true
+dataset = "rpool/guests/infra-01"
