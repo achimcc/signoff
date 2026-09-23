@@ -1,0 +1,9 @@
+[
+  {
+    "group_key": {"hostname": "server", "label": "rpool/guests/fin-01", "paths": ["/var/lib/nixos-containers/fin-01"]},
+    "snapshots": [
+      {"time": "2026-09-22T04:40:12.100000000+02:00", "label": "rpool/guests/fin-01", "paths": ["/var/lib/nixos-containers/fin-01"], "summary": {"total_files_processed": 4120}},
+      {"time": "2026-09-23T04:40:35.297023632+02:00", "label": "rpool/guests/fin-01", "paths": ["/var/lib/nixos-containers/fin-01"], "summary": {"total_files_processed": 4131}}
+    ]
+  }
+]
