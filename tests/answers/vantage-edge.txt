@@ -1,0 +1,1 @@
+vantage: probe infra-01 (10.0.20.11) -> fin-01 (10.0.190.10):3334/ sport 42358: dropped at zone edge — the host's forward chain, not the service; an edge belongs in the declared set only if a SERVICE needs this path
