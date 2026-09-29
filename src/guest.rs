@@ -5,7 +5,7 @@
 //! ABSOLUTE program path (`--machine=` does not search PATH).
 
 use crate::curlrc::CurlRc;
-use crate::runner::{Output, Runner};
+use crate::runner::{Limits, Output, Runner};
 
 pub const SYSTEMD_RUN: &str = "systemd-run";
 pub const CURL: &str = "/run/current-system/sw/bin/curl";
@@ -38,7 +38,12 @@ pub fn run(
     argv: &[&str],
     stdin: Option<&[u8]>,
 ) -> Result<Output, String> {
-    let out = r.run(SYSTEMD_RUN, &args(guest, program, argv), stdin)?;
+    let out = r.run_with(
+        SYSTEMD_RUN,
+        &args(guest, program, argv),
+        stdin,
+        Limits::GUEST,
+    )?;
     if out.code == Some(203) {
         return Err(format!(
             "{program} is not in the profile of {guest} (203/EXEC)"
@@ -89,7 +94,9 @@ pub fn leader(r: &dyn Runner, guest: &str) -> Result<u32, String> {
 /// Exit 1 — das wird hier als „nicht messbar“ benannt, nicht als curl-Fehler.
 pub fn host_curl_in_netns(r: &dyn Runner, guest: &str, rc: &CurlRc) -> Result<Output, String> {
     let pid = leader(r, guest)?.to_string();
-    let out = r.run(
+    // Das Programm ist des Wirts, die ANTWORT kommt vom Dienst im Gast —
+    // deshalb der enge Deckel.
+    let out = r.run_with(
         NSENTER,
         &[
             "-t".into(),
@@ -101,6 +108,7 @@ pub fn host_curl_in_netns(r: &dyn Runner, guest: &str, rc: &CurlRc) -> Result<Ou
             "-".into(),
         ],
         Some(&rc.render()),
+        Limits::GUEST,
     )?;
     if let Some(zeile) = out.stderr.lines().find(|z| z.starts_with("nsenter:")) {
         return Err(format!(

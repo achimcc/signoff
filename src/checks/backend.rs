@@ -3,7 +3,7 @@
 //! refusal or a drop elsewhere — the verdict words are vantage's.
 
 use crate::config::{Config, Service};
-use crate::runner::{Output, Runner};
+use crate::runner::{Limits, Output, Runner};
 use crate::verdict::Verdict;
 
 pub const VANTAGE: &str = "vantage";
@@ -81,7 +81,13 @@ pub fn check(r: &dyn Runner, cfg: &Config, s: &Service) -> Verdict {
             .map_or(backend.as_str(), |(ip, _)| ip);
         return Verdict::CannotMeasure(format!("backend {ip} is not a declared guest"));
     };
-    match r.run(VANTAGE, &args(&cfg.caddy_guest, guest, port), None) {
+    match r.run_with(
+        VANTAGE,
+        &args(&cfg.caddy_guest, guest, port),
+        None,
+        // vantage ist des Wirts, sein Urteil beruht auf der Antwort eines Gastes.
+        Limits::GUEST,
+    ) {
         Ok(out) => judge(&out),
         Err(e) => Verdict::CannotMeasure(e),
     }

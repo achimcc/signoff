@@ -88,13 +88,7 @@ pub fn main(argv: &[String]) -> i32 {
                 plan(&cfg, &selected, &mut out);
                 0
             } else {
-                check(
-                    &System::default(),
-                    &cfg,
-                    &selected,
-                    crate::time::now(),
-                    &mut out,
-                )
+                check(&System, &cfg, &selected, crate::time::now(), &mut out)
             }
         }
     }

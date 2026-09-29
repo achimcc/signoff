@@ -14,10 +14,16 @@ aufhalten noch den Bericht steuern noch das Urteil fälschen können.
   `verdict::sanitize` schreibt jetzt jedes Steuerzeichen und jede
   Bidi-Steuerung sichtbar (`\x1b`, `\x0a`, `\u{202e}`) und kürzt auf 300
   Zeichen; angewandt an der einen Stelle, durch die jede Berichtszeile geht
-  (`format_line`), und an den Meldungen `control failed`. Dazu hat der
-  `System`-Runner eine Frist (120 s) und einen Lesedeckel (1 MiB je Strom):
-  Wer länger läuft oder mehr schreibt, wird beendet, die Ausgabe verworfen,
-  die Messung heißt `cannot measure`. Bisher stand eine Zeitgrenze nur als
+  (`format_line`), und an den Meldungen `control failed`. Dazu hat jeder
+  Aufruf eine Frist und einen Lesedeckel je Strom, **je Aufruf gesetzt**
+  (`runner::Limits`): was ein Gast liefert (`systemd-run --machine`,
+  `nsenter -n … curl`, vantage) 120 s und 1 MiB; Werkzeuge des Wirts (dig,
+  curl von `public-path`, machinectl) 120 s und 64 MiB; rustic 600 s und
+  64 MiB. Wer länger läuft oder mehr schreibt, wird beendet, die Ausgabe
+  verworfen, die Messung heißt `cannot measure`. (Ein erster Wurf hatte
+  1 MiB pauschal — rustics Snapshotliste über das ganze Repo, rund 2000
+  Snapshots, ist am Server weit größer, und jeder Lauf endete mit Exit 2.
+  Die Frist für rustic ist nicht gemessen und deshalb großzügig.) Bisher stand eine Zeitgrenze nur als
   `max-time` in der curl-Konfiguration, die ein Gast-curl ignorieren kann,
   und `systemd-run --wait` wartete ewig. Auch ein Enkel, der die Leitung
   nach dem Ende des Kindes offen hält, hält den Lauf nicht mehr auf.

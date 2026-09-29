@@ -3,7 +3,7 @@
 //! repository only after the next run.
 
 use crate::config::{Config, Service};
-use crate::runner::{Output, Runner};
+use crate::runner::{Limits, Output, Runner};
 use crate::time::{hours_between, parse_rfc3339};
 use crate::verdict::Verdict;
 use serde_json::Value;
@@ -77,7 +77,12 @@ pub fn judge(out: &Output, dataset: &str, max_age_hours: u64, now: i64) -> Verdi
 }
 
 pub fn check(r: &dyn Runner, cfg: &Config, s: &Service, now: i64) -> Verdict {
-    match r.run(RUSTIC, &args(&cfg.rustic_profile, Some(&s.dataset)), None) {
+    match r.run_with(
+        RUSTIC,
+        &args(&cfg.rustic_profile, Some(&s.dataset)),
+        None,
+        Limits::RUSTIC,
+    ) {
         Ok(out) => judge(&out, &s.dataset, cfg.snapshot_max_age_hours, now),
         Err(e) => Verdict::CannotMeasure(e),
     }
@@ -86,7 +91,12 @@ pub fn check(r: &dyn Runner, cfg: &Config, s: &Service, now: i64) -> Verdict {
 /// The repository lists something at all — else "no snapshot for X" would
 /// be a statement about the repository, not the dataset.
 pub fn control_repo(r: &dyn Runner, cfg: &Config) -> Result<(), String> {
-    let out = r.run(RUSTIC, &args(&cfg.rustic_profile, None), None)?;
+    let out = r.run_with(
+        RUSTIC,
+        &args(&cfg.rustic_profile, None),
+        None,
+        Limits::RUSTIC,
+    )?;
     let snaps = snapshots(&out).map_err(|e| format!("control: {e}"))?;
     if snaps.is_empty() {
         Err(format!(

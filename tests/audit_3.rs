@@ -2,9 +2,10 @@
 //! Beide Faelle stammen aus dem Probetest des Auditors (`audit_a2.rs`) und
 //! waren gegen v0.1.1 rot.
 
+use signoff::checks::backup;
 use signoff::checks::factory_login;
 use signoff::config::parse;
-use signoff::runner::{Fake, Output};
+use signoff::runner::{Fake, Limits, Output};
 use signoff::verdict::{Finding, format_line};
 
 fn out(code: i32, stdout: &str, stderr: &str) -> Output {
@@ -73,4 +74,29 @@ fn b113_werkskonto_probe_faehrt_kein_gastprogramm() {
     );
     // Und das Urteil kommt vom Wirts-curl, nicht vom Gast.
     assert_eq!(v.label(), "failed", "{v:?}");
+}
+
+/// B112, Nachtrag: Der enge Deckel gehoert an das, was ein GAST liefert —
+/// nicht an rustic, dessen Liste ueber das ganze Repo am Server weit ueber
+/// 1 MiB hat (0.2.0 endete dort mit jedem Lauf bei Exit 2).
+#[test]
+fn b112_deckel_je_aufruf_gast_eng_rustic_weit() {
+    let cfg = parse(include_str!("answers/signoff.toml")).unwrap();
+    let s = cfg.service("ghostfolio").unwrap();
+    let fake = Fake::new()
+        .on("machinectl", "Leader", out(0, "4242\n", ""))
+        .on("nsenter", "", out(0, "401", ""));
+    factory_login::check(&fake, s);
+    assert_eq!(fake.limits(), vec![Limits::HOST, Limits::GUEST]);
+
+    let fake = Fake::new().on(
+        "rustic",
+        "",
+        out(0, include_str!("answers/rustic-fin-01.json"), ""),
+    );
+    let _ = backup::control_repo(&fake, &cfg);
+    let _ = backup::check(&fake, &cfg, s, 0);
+    assert_eq!(fake.limits(), vec![Limits::RUSTIC, Limits::RUSTIC]);
+    const { assert!(Limits::RUSTIC.deckel >= 64 << 20) };
+    const { assert!(Limits::GUEST.deckel <= 1 << 20) };
 }

@@ -211,9 +211,13 @@ finding about the network, not about the service.
 
 ## Limits and privileges
 
-- **Every command has a limit of its own**: 120 s, and at most 1 MiB per
-  stream (stdout, stderr). A command that runs longer or writes more is
-  killed and its output discarded; the measurement reads `cannot measure`.
+- **Every command has a limit of its own, set per call**: what a guest
+  answers (`systemd-run --machine`, `nsenter -n … curl`, `vantage`) 120 s
+  and at most 1 MiB per stream (stdout, stderr); the host's own tools
+  (`dig`, `curl` of `public-path`, `machinectl`) 120 s and 64 MiB; `rustic`
+  600 s and 64 MiB (it lists the whole repository). A command that runs
+  longer or writes more is killed and its output discarded; the
+  measurement reads `cannot measure`.
   A guest cannot hold the run or fill the host's memory — `max-time` in a
   curl config would only bind a `curl` that honours it.
 - **Every detail is made visible before it is printed**: control
