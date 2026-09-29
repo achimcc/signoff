@@ -40,7 +40,7 @@ need either one or more service keys or `--all`, never both.
 | `backend` | `vantage probe --from <proxy guest> <guest>:<port>`: `answered` is ok; `refused` / `dropped at zone edge` / `dropped elsewhere` are findings | a `backend` and `backend_guest` are declared |
 | `outpost` | a proxy provider with `external_host https://<host>` exists and the embedded outpost carries it | `forward_auth` |
 | `backup` | the newest rustic snapshot for the guest's dataset is younger than `snapshot_max_age_hours` | always |
-| `factory-login` | the declared vendor default account is tried inside the guest, against the backend, and must be rejected; nothing declared → `undeclared` | `factory_login` is declared |
+| `factory-login` | the declared vendor default account is tried against the backend and must be rejected — with the HOST's `curl`, in the guest's network namespace (`nsenter -t <leader> -n`), so a taken-over guest cannot fake the verdict with its own `curl`; nothing declared → `undeclared` | `factory_login` is declared |
 
 ### Verdicts
 
@@ -155,7 +155,7 @@ shows a public, forward-auth service with no `backend` at all.)
   - `host` — the public DNS name (also used for `dig` and `curl` even when
     `public = false`, so a declaration stays meaningful if that ever flips).
   - `guest` — the guest the service itself runs in; `factory-login` runs
-    here.
+    in its network namespace (not with its programs).
   - `public` — whether `dns-a`, `dns-aaaa` and `public-path` apply.
   - `backend` — the service's `ip:port` behind the reverse proxy, or absent
     if there is none (then `backend` is `n/a`).
@@ -208,6 +208,23 @@ finding about the network, not about the service.
   (`cannot measure`) — the run says nothing complete. Also used for a
   command-line error, a config that fails to load, or an unknown service
   name.
+
+## Limits and privileges
+
+- **Every command has a limit of its own**: 120 s, and at most 1 MiB per
+  stream (stdout, stderr). A command that runs longer or writes more is
+  killed and its output discarded; the measurement reads `cannot measure`.
+  A guest cannot hold the run or fill the host's memory — `max-time` in a
+  curl config would only bind a `curl` that honours it.
+- **Every detail is made visible before it is printed**: control
+  characters (and bidi overrides) are written as `\x1b`, `\u{202e}`, a
+  newline as `\x0a`, and a detail is cut after 300 characters. A detail
+  often carries what a guest produced (the first stderr line of a `curl`,
+  names from Authentik); raw, an `ESC ] 52` would write the clipboard of
+  the terminal that reads the report.
+- **Privileges**: `systemd-run --machine` for the auth guest, `machinectl`
+  and `nsenter -n` for `factory-login` — the last needs `CAP_SYS_ADMIN`
+  (setns) and `CAP_SYS_PTRACE` (the leader's namespace file).
 
 ## What it does not do
 

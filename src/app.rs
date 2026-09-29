@@ -4,7 +4,7 @@ use crate::checks::{backend, backup, dns, factory_login, outpost, public_path};
 use crate::cli::{Args, Cmd, USAGE};
 use crate::config::{Config, Service};
 use crate::runner::{Runner, System};
-use crate::verdict::{Finding, Summary, Verdict, format_line};
+use crate::verdict::{Finding, Summary, Verdict, format_line, sanitize};
 use std::io::Write;
 use std::path::Path;
 
@@ -22,8 +22,9 @@ signoff asks, per service, whether it is really done. Seven measurements:
                     embedded outpost carries it (only with forward_auth)
   backup            the newest rustic snapshot for the guest's dataset is younger
                     than snapshot_max_age_hours
-  factory-login     the declared vendor default account is rejected (tried inside
-                    the guest, against the backend); no declaration → undeclared
+  factory-login     the declared vendor default account is rejected (tried against
+                    the backend with the HOST's curl, in the guest's network
+                    namespace: nsenter -t <leader> -n); no declaration → undeclared
 
 Verdicts:
   ok               measured, as expected
@@ -87,7 +88,13 @@ pub fn main(argv: &[String]) -> i32 {
                 plan(&cfg, &selected, &mut out);
                 0
             } else {
-                check(&System, &cfg, &selected, crate::time::now(), &mut out)
+                check(
+                    &System::default(),
+                    &cfg,
+                    &selected,
+                    crate::time::now(),
+                    &mut out,
+                )
             }
         }
     }
@@ -150,7 +157,7 @@ pub fn check(
     ];
     for control in controls {
         if let Err(e) = control(r, cfg) {
-            eprintln!("signoff: control failed: {e}");
+            eprintln!("signoff: control failed: {}", sanitize(&e));
             return 2;
         }
     }
@@ -193,7 +200,7 @@ pub fn check(
                     // forward-auth service fetches a token — but ends the
                     // run the same way as the other three.
                     Err(outpost::Unavailable::Control(e)) => {
-                        eprintln!("signoff: control failed: {e}");
+                        eprintln!("signoff: control failed: {}", sanitize(&e));
                         return 2;
                     }
                 }),
@@ -309,7 +316,7 @@ pub fn plan(cfg: &Config, services: &[&Service], out: &mut dyn Write) {
                 s,
                 "factory-login",
                 format!(
-                    "{} http://{b}{} in {}, reject {:?}",
+                    "{} http://{b}{} from the host's curl in the network of {}, reject {:?}",
                     f.method, f.path, s.guest, f.reject
                 ),
             ),
@@ -401,7 +408,12 @@ mod tests {
                     "",
                 ),
             )
-            .on("systemd-run", "--machine=fin-01", out(0, "401", ""))
+            .on(
+                "machinectl",
+                "fin-01 --property=Leader",
+                out(0, "4242\n", ""),
+            )
+            .on("nsenter", "-t 4242 -n", out(0, "401", ""))
             .on(
                 "rustic",
                 "--filter-label",
@@ -600,7 +612,12 @@ mod tests {
                     "",
                 ),
             )
-            .on("systemd-run", "--machine=fin-01", out(0, "401", ""))
+            .on(
+                "machinectl",
+                "fin-01 --property=Leader",
+                out(0, "4242\n", ""),
+            )
+            .on("nsenter", "-t 4242 -n", out(0, "401", ""))
             .on(
                 "rustic",
                 "",
@@ -662,7 +679,7 @@ mod tests {
         );
         assert!(
             text.contains(
-                "POST http://10.0.190.10:3333/api/auth/token in fin-01, reject [401, 403]"
+                "POST http://10.0.190.10:3333/api/auth/token from the host's curl in the network of fin-01, reject [401, 403]"
             ),
             "{text}"
         );

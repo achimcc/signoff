@@ -9,6 +9,12 @@ use crate::runner::{Output, Runner};
 
 pub const SYSTEMD_RUN: &str = "systemd-run";
 pub const CURL: &str = "/run/current-system/sw/bin/curl";
+pub const MACHINECTL: &str = "machinectl";
+pub const NSENTER: &str = "nsenter";
+/// Das curl des WIRTS, ueber dessen PATH — wie `public-path`. `nsenter -n`
+/// wechselt nur den Netz-Namensraum, der Pfad wird also im Dateisystem des
+/// Wirts aufgeloest, nie in dem des Gastes.
+pub const HOST_CURL: &str = "curl";
 pub const KURZTOKEN: &str = "/run/current-system/sw/bin/authentik-kurztoken";
 
 pub fn args(guest: &str, program: &str, args: &[&str]) -> Vec<String> {
@@ -43,6 +49,65 @@ pub fn run(
 
 pub fn curl(r: &dyn Runner, guest: &str, rc: &CurlRc) -> Result<Output, String> {
     run(r, guest, CURL, &["-K", "-"], Some(&rc.render()))
+}
+
+/// Die Leader-PID eines Gastes, wie machined sie kennt.
+pub fn leader(r: &dyn Runner, guest: &str) -> Result<u32, String> {
+    let out = r.run(
+        MACHINECTL,
+        &[
+            "show".into(),
+            guest.into(),
+            "--property=Leader".into(),
+            "--value".into(),
+        ],
+        None,
+    )?;
+    match out.stdout.trim().parse::<u32>() {
+        // 0 und 1 waeren der Wirt selbst — dort misst diese Probe nie.
+        Ok(pid) if out.code == Some(0) && pid > 1 => Ok(pid),
+        _ => Err(format!(
+            "machinectl names no leader for {guest} (exit {:?}): {}",
+            out.code,
+            out.stderr.trim().lines().next().unwrap_or("")
+        )),
+    }
+}
+
+/// curl des WIRTS im Netz-Namensraum des Gastes (Audit 3, B113).
+///
+/// `curl` oben fuehrt das curl aus dem Profil des GASTES aus — ein
+/// uebernommener Gast bestimmt damit, was die Probe sieht (ein curl, das
+/// immer `401` sagt, macht jedes Werkskonto „abgewiesen“). Hier laeuft das
+/// Programm des Wirts; der Gast stellt nur das Netz, und das ist derselbe
+/// Standpunkt wie vorher: dieselben Adressen, dieselbe Firewall. Der Weg
+/// ist der von groundtruth (`nsenter -t <leader> -n`). Die Probe geht wie
+/// immer per stdin, nie in argv.
+///
+/// `nsenter -n` braucht CAP_SYS_ADMIN (setns) und CAP_SYS_PTRACE (die
+/// Namensraum-Datei des Leaders). Fehlt eins, antwortet nsenter selbst mit
+/// Exit 1 — das wird hier als „nicht messbar“ benannt, nicht als curl-Fehler.
+pub fn host_curl_in_netns(r: &dyn Runner, guest: &str, rc: &CurlRc) -> Result<Output, String> {
+    let pid = leader(r, guest)?.to_string();
+    let out = r.run(
+        NSENTER,
+        &[
+            "-t".into(),
+            pid,
+            "-n".into(),
+            "--".into(),
+            HOST_CURL.into(),
+            "-K".into(),
+            "-".into(),
+        ],
+        Some(&rc.render()),
+    )?;
+    if let Some(zeile) = out.stderr.lines().find(|z| z.starts_with("nsenter:")) {
+        return Err(format!(
+            "cannot enter the network namespace of {guest}: {zeile}"
+        ));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -90,6 +155,82 @@ mod tests {
             String::from_utf8(stdin.clone().unwrap())
                 .unwrap()
                 .contains("Bearer SECRET")
+        );
+    }
+
+    #[test]
+    fn host_curl_betritt_nur_das_netz_des_leaders() {
+        let fake = Fake::new()
+            .on(
+                "machinectl",
+                "fin-01 --property=Leader",
+                Output {
+                    code: Some(0),
+                    stdout: "4242\n".into(),
+                    stderr: String::new(),
+                },
+            )
+            .on(
+                "nsenter",
+                "",
+                Output {
+                    code: Some(0),
+                    stdout: "401".into(),
+                    stderr: String::new(),
+                },
+            );
+        let rc = CurlRc::new("http://10.0.190.10:3333/").code_only();
+        let out = host_curl_in_netns(&fake, "fin-01", &rc).unwrap();
+        assert_eq!(out.stdout, "401");
+        let (prog, argv, stdin) = &fake.calls()[1];
+        assert_eq!(prog, "nsenter");
+        assert_eq!(argv, &["-t", "4242", "-n", "--", "curl", "-K", "-"]);
+        assert!(
+            String::from_utf8(stdin.clone().unwrap())
+                .unwrap()
+                .contains("http://10.0.190.10:3333/")
+        );
+    }
+
+    #[test]
+    fn ohne_leader_oder_ohne_setns_ist_es_nicht_messbar() {
+        let aus = |code, stdout: &str, stderr: &str| Output {
+            code: Some(code),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        };
+        let rc = CurlRc::new("http://x/").code_only();
+        for (code, stdout) in [
+            (0, ""),
+            (0, "0\n"),
+            (0, "1\n"),
+            (1, "4242\n"),
+            (0, "4242 x"),
+        ] {
+            let fake = Fake::new().on(
+                "machinectl",
+                "",
+                aus(code, stdout, "Could not get path to machine"),
+            );
+            let e = host_curl_in_netns(&fake, "fin-01", &rc).unwrap_err();
+            assert!(
+                e.starts_with("machinectl names no leader for fin-01"),
+                "{e}"
+            );
+            assert_eq!(fake.calls().len(), 1, "ohne Leader kein nsenter");
+        }
+        let fake = Fake::new().on("machinectl", "", aus(0, "4242\n", "")).on(
+            "nsenter",
+            "",
+            aus(
+                1,
+                "",
+                "nsenter: reassociate to namespace 'ns/net' failed: Operation not permitted\n",
+            ),
+        );
+        assert_eq!(
+            host_curl_in_netns(&fake, "fin-01", &rc).unwrap_err(),
+            "cannot enter the network namespace of fin-01: nsenter: reassociate to namespace 'ns/net' failed: Operation not permitted"
         );
     }
 

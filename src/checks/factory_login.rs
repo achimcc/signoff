@@ -1,7 +1,11 @@
 //! Does the vendor's default account still log in? The door is TRIED, not
 //! asked about: a setting that says "registration disabled" has been wrong
-//! here before. Run inside the service's guest against the zone address,
+//! here before. Run in the service guest's NETWORK against the zone address,
 //! never through the public name (the identity provider sits in front).
+//!
+//! Seit v0.2.0 mit dem curl des WIRTS (`guest::host_curl_in_netns`), nicht
+//! mehr mit dem des Gastes (Audit 3, B113): Das Urteil soll auch gegen einen
+//! uebernommenen Gast etwas belegen.
 
 use crate::config::{FactoryLogin, Service};
 use crate::curlrc::CurlRc;
@@ -59,7 +63,7 @@ pub fn check(r: &dyn Runner, s: &Service) -> Verdict {
     let Some(backend) = &s.backend else {
         return Verdict::CannotMeasure("factory_login declared but no backend".into());
     };
-    match guest::curl(r, &s.guest, &rc(backend, f)) {
+    match guest::host_curl_in_netns(r, &s.guest, &rc(backend, f)) {
         Ok(out) => judge(&out, &f.reject),
         Err(e) => Verdict::CannotMeasure(e),
     }
@@ -141,7 +145,13 @@ mod tests {
     #[test]
     fn check_runs_in_the_service_guest_and_reports_undeclared() {
         let c = cfg();
-        let fake = Fake::new().on("systemd-run", "--machine=fin-01", out(0, "403", ""));
+        let fake = Fake::new()
+            .on(
+                "machinectl",
+                "fin-01 --property=Leader",
+                out(0, "4242\n", ""),
+            )
+            .on("nsenter", "-t 4242 -n -- curl", out(0, "403", ""));
         assert_eq!(
             check(&fake, c.service("ghostfolio").unwrap()),
             Verdict::Ok("HTTP 403: factory account rejected".into())
@@ -153,14 +163,22 @@ mod tests {
     }
 
     #[test]
-    fn factory_login_without_curl_is_cannot_measure() {
+    fn factory_login_without_a_running_guest_is_cannot_measure() {
         let c = cfg();
-        let fake = Fake::new().on("systemd-run", "--machine=fin-01", out(203, "", ""));
+        let fake = Fake::new().on(
+            "machinectl",
+            "fin-01",
+            out(
+                1,
+                "",
+                "Could not get path to machine: No machine 'fin-01' known",
+            ),
+        );
         let v = check(&fake, c.service("ghostfolio").unwrap());
         assert_eq!(
             v,
             Verdict::CannotMeasure(
-                "/run/current-system/sw/bin/curl is not in the profile of fin-01 (203/EXEC)".into()
+                "machinectl names no leader for fin-01 (exit Some(1)): Could not get path to machine: No machine 'fin-01' known".into()
             )
         );
     }

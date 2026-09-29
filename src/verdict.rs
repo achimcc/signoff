@@ -85,13 +85,48 @@ impl Summary {
     }
 }
 
+/// Hoechstens so viele Zeichen je Detail — eine Berichtszeile, kein Dump.
+pub const DETAIL_MAX: usize = 300;
+
+/// Macht einen Text fuer Terminal, Journal und Alarmmail ungefaehrlich
+/// (Audit 3, B112). Ein Detail traegt oft, was ein Gast geliefert hat
+/// (die erste stderr-Zeile seines curl, Namen aus Authentik): Ein roher
+/// `ESC ] 52` schreibt in vielen Terminals die Zwischenablage, `ESC [ 2 J`
+/// loescht den Schirm, ein Zeilenumbruch erfindet eine zweite Berichtszeile,
+/// und eine Bidi-Steuerung (U+202E) dreht die Leserichtung um. Jedes davon
+/// wird SICHTBAR geschrieben (`\x1b`, `\u{202e}`), nichts faellt still weg —
+/// wer den Bericht liest, soll sehen, dass da etwas war. Nur der Tabulator
+/// bleibt. Laenger als `DETAIL_MAX` Zeichen wird abgeschnitten, mit `…`.
+pub fn sanitize(text: &str) -> String {
+    let mut aus = String::with_capacity(text.len().min(DETAIL_MAX * 2));
+    for (n, c) in text.chars().enumerate() {
+        if n == DETAIL_MAX {
+            aus.push('…');
+            break;
+        }
+        let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        if (c.is_control() && c != '\t') || bidi {
+            if (c as u32) < 0x80 {
+                aus.push_str(&format!("\\x{:02x}", c as u32));
+            } else {
+                aus.push_str(&format!("\\u{{{:x}}}", c as u32));
+            }
+        } else {
+            aus.push(c);
+        }
+    }
+    aus
+}
+
+/// Die eine Stelle, durch die jedes Urteil in den Bericht geht — deshalb
+/// wird HIER gesaeubert und nicht bei jedem der Pruefer (Audit 3, B112).
 pub fn format_line(f: &Finding) -> String {
     format!(
         "{:<15} {:<15} {:<16} {}",
-        f.service,
+        sanitize(&f.service),
         f.check,
         f.verdict.label(),
-        f.verdict.detail()
+        sanitize(f.verdict.detail())
     )
 }
 
@@ -105,6 +140,20 @@ mod tests {
             check,
             verdict: v,
         }
+    }
+
+    #[test]
+    fn sanitize_macht_steuerzeichen_sichtbar_und_kuerzt() {
+        assert_eq!(
+            sanitize("a\x1b[2Jb\x07\nc\td\u{202e}e"),
+            "a\\x1b[2Jb\\x07\\x0ac\td\\u{202e}e"
+        );
+        // C1-Steuerzeichen (U+009B ist ein einzelnes CSI) ebenso.
+        assert_eq!(sanitize("\u{9b}2J"), "\\u{9b}2J");
+        assert_eq!(sanitize("ok HTTP 401"), "ok HTTP 401");
+        let lang = sanitize(&"x".repeat(DETAIL_MAX + 50));
+        assert_eq!(lang.chars().count(), DETAIL_MAX + 1);
+        assert!(lang.ends_with('…'));
     }
 
     #[test]
