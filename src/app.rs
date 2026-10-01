@@ -24,15 +24,21 @@ signoff asks, per service, whether it is really done. Seven measurements:
                     than snapshot_max_age_hours
   factory-login     the declared vendor default account is rejected (tried against
                     the backend with the HOST's curl, in the guest's network
-                    namespace: nsenter -t <leader> -n); no declaration → undeclared
+                    namespace: nsenter -t <leader> -n). With reject_body, a status
+                    in reject only counts when the body contains that text — the
+                    body itself is never printed, only its length.
+                    no_factory_login = \"<reason>\" instead of a probe → n/a: <reason>;
+                    neither of the two → undeclared
 
 Verdicts:
   ok               measured, as expected
   failed           measured, not as expected — a finding (exit 1)
   cannot measure   the path to the answer did not carry (exit 2)
   n/a: <why>       not applicable to this service (not public, no backend,
-                   no forward_auth) — never changes the exit code
-  undeclared       factory-login only: nobody declared a probe — a hint, not green
+                   no forward_auth, no_factory_login) — never changes the exit code
+  undeclared       factory-login only: neither a probe nor a reason is declared —
+                   a hint, not green. With undeclared_is_failure = true it is
+                   `failed` instead (exit 1)
 
   public-path: curl exit 60/51 (certificate not verifiable, name not in the
   certificate) is a finding about the service, not \"cannot measure\"
@@ -213,7 +219,10 @@ pub fn check(
         emit(
             out,
             &mut findings,
-            line("factory-login", factory_login::check(r, s)),
+            line(
+                "factory-login",
+                factory_login::strict(factory_login::check(r, s), cfg.undeclared_is_failure),
+            ),
         );
     }
     let summary = Summary::of(&findings);
@@ -304,32 +313,30 @@ pub fn plan(cfg: &Config, services: &[&Service], out: &mut dyn Write) {
                 cfg.snapshot_max_age_hours
             ),
         );
-        match (&s.factory_login, &s.backend) {
-            (Some(f), Some(b)) => row(
-                out,
-                s,
-                "factory-login",
-                format!(
-                    "{} http://{b}{} from the host's curl in the network of {}, reject {:?}",
-                    f.method, f.path, s.guest, f.reject
-                ),
+        // Same order as `check`: the exception first, then the probe.
+        let factory_login = match (&s.no_factory_login, &s.factory_login, &s.backend) {
+            (Some(reason), _, _) => na(&sanitize(reason)),
+            (None, Some(f), Some(b)) => format!(
+                "{} http://{b}{} from the host's curl in the network of {}, reject {:?}{}",
+                f.method,
+                f.path,
+                s.guest,
+                f.reject,
+                match &f.reject_body {
+                    Some(text) => format!(" with a body containing {text:?}"),
+                    None => String::new(),
+                }
             ),
-            (Some(_), None) => row(
-                out,
-                s,
-                "factory-login",
-                format!(
-                    "{:<16} factory_login declared but no backend",
-                    "cannot measure"
-                ),
+            (None, Some(_), None) => format!(
+                "{:<16} factory_login declared but no backend",
+                "cannot measure"
             ),
-            (None, _) => row(
-                out,
-                s,
-                "factory-login",
-                format!("{:<16} no probe in lib/werkskonten.nix", "undeclared"),
-            ),
-        }
+            (None, None, _) if cfg.undeclared_is_failure => {
+                format!("{:<16} {}", "failed", factory_login::UNDECLARED_STRICT)
+            }
+            (None, None, _) => format!("{:<16} {}", "undeclared", factory_login::UNDECLARED),
+        };
+        row(out, s, "factory-login", factory_login);
     }
 }
 

@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.0 — 2026-10-01
+
+Befund B143 aus dem IT-Sicherheits-Audit 3 des Homeservers (`low`): Die
+Werkskonto-Probe kannte für einen Dienst ohne Probe nur `undeclared`,
+konnte eine abgewiesene Anmeldung nicht von einer angenommenen
+unterscheiden, wo beide mit HTTP 200 antworten, und ein `undeclared` machte
+nie einen Lauf rot. Drei Erweiterungen, die Vorgabe bleibt in allen drei
+unverändert.
+
+- **Begründete Ausnahme: `no_factory_login = "<reason>"`** je Dienst. Der
+  Dienst hat ab Werk kein Konto (oder die lokale Anmeldung ist
+  abgeschaltet), und jemand hat den Grund hingeschrieben. Urteil
+  `n/a` mit dem Grund als Detail, nichts wird probiert, der Exit-Code
+  ändert sich nicht. Zusammen mit `[service.factory_login]` am selben
+  Dienst ist es ein Konfigurationsfehler, ein leerer oder nur aus
+  Leerzeichen bestehender Grund ebenso.
+- **Ablehnung am Antworttext: `factory_login.reject_body = "<substring>"`.**
+  qBittorrent beantwortet eine falsche Anmeldung mit HTTP 200 und `Fails.`,
+  eine richtige mit HTTP 200 und `Ok.`. Ist das Feld gesetzt, gilt eine
+  Antwort nur als abgewiesen, wenn ihr Status in `reject` steht UND der
+  Körper den Teilstring enthält; Status in `reject` ohne den Text ist
+  `failed` („the door may be open“). **Der Körper steht nie im Bericht,
+  nur seine Länge** — die Antwort auf eine ANGENOMMENE Anmeldung ist ein
+  Sitzungstoken; auch die Meldung „kein Status“ zitiert in diesem Modus
+  stdout nicht mehr. curl liefert dafür den Körper und danach den Status
+  auf einer eigenen letzten Zeile (`write-out = "\n%{http_code}"`); gelesen
+  wird unter dem Deckel für Gastantworten (`Limits::GUEST`, 1 MiB), mehr
+  ist `cannot measure`. Ohne das Feld verwirft curl den Körper wie bisher.
+  Ein leerer Teilstring ist ein Konfigurationsfehler (er steckt in jedem
+  Körper).
+- **Strikt: `undeclared_is_failure = true`** auf oberster Ebene (Vorgabe
+  `false`). Ein Dienst ohne Probe und ohne Ausnahme ist dann `failed`
+  (Exit 1) statt `undeclared`; die Zeile sagt, dass keins von beiden
+  deklariert ist.
+- `signoff plan` und `signoff rules` nennen alle drei.
+- Riegel: `tests/audit_3_b143.rs` (sieben Fälle über Konfigurationstext und
+  `app::check`, sechs davon gegen 0.2.0 rot) und Einheitstests in
+  `config.rs`, `curlrc.rs` und `checks/factory_login.rs`.
+
 ## 0.2.0 — 2026-09-29
 
 Zwei Befunde aus dem IT-Sicherheits-Audit 3 des Homeservers (2026-09-27),

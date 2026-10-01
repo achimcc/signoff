@@ -40,7 +40,7 @@ need either one or more service keys or `--all`, never both.
 | `backend` | `vantage probe --from <proxy guest> <guest>:<port>`: `answered` is ok; `refused` / `dropped at zone edge` / `dropped elsewhere` are findings | a `backend` and `backend_guest` are declared |
 | `outpost` | a proxy provider with `external_host https://<host>` exists and the embedded outpost carries it | `forward_auth` |
 | `backup` | the newest rustic snapshot for the guest's dataset is younger than `snapshot_max_age_hours` | always |
-| `factory-login` | the declared vendor default account is tried against the backend and must be rejected — with the HOST's `curl`, in the guest's network namespace (`nsenter -t <leader> -n`), so a taken-over guest cannot fake the verdict with its own `curl`; nothing declared → `undeclared` | `factory_login` is declared |
+| `factory-login` | the declared vendor default account is tried against the backend and must be rejected — with the HOST's `curl`, in the guest's network namespace (`nsenter -t <leader> -n`), so a taken-over guest cannot fake the verdict with its own `curl`. With `reject_body`, a status in `reject` only counts as a rejection when the body contains that text (a service that answers a wrong login with HTTP 200). `no_factory_login = "<reason>"` instead of a probe → `n/a: <reason>`; neither of the two → `undeclared` | `factory_login` is declared |
 
 ### Verdicts
 
@@ -48,9 +48,12 @@ need either one or more service keys or `--all`, never both.
 - `failed` — measured, not as expected: a finding (exit 1).
 - `cannot measure` — the path to the answer did not carry (exit 2).
 - `n/a: <why>` — not applicable to this service (not public, no backend, no
-  `forward_auth`); never changes the exit code.
-- `undeclared` — `factory-login` only: nobody declared a probe yet, a hint,
-  not green.
+  `forward_auth`, or a `no_factory_login` reason — then `<why>` is that
+  reason); never changes the exit code.
+- `undeclared` — `factory-login` only: neither a probe nor a
+  `no_factory_login` reason is declared — a hint, not green. With
+  `undeclared_is_failure = true` the line reads `failed` instead and the
+  run exits 1.
 
 ## Example output
 
@@ -69,7 +72,8 @@ ghostfolio      factory-login   ok               HTTP 401: factory account rejec
 One line per service and measurement, then a summary line. A service that is
 not public and has no `forward_auth` (e.g. `radarr` in the example
 configuration below) prints `n/a` for `dns-a`, `dns-aaaa`, `public-path` and
-`outpost`, and `undeclared` for `factory-login` unless a probe is declared —
+`outpost`, and `undeclared` for `factory-login` unless a probe or a
+`no_factory_login` reason is declared —
 `backend` and `backup` still run, because those apply regardless of whether
 the service is public.
 
@@ -129,7 +133,8 @@ dataset = "rpool/guests/infra-01"
 (This is the full `tests/answers/signoff.toml` fixture the test suite uses,
 shown here so every service referenced elsewhere in this README —
 `ghostfolio`, `radarr`, `start` — resolves to a real block. `radarr` shows
-an internal-only service with a backend but no `factory_login`; `start`
+an internal-only service with a backend but neither a `factory_login` nor
+a `no_factory_login`; `start`
 shows a public, forward-auth service with no `backend` at all.)
 
 - `zone` — the DNS zone the service names live under; also the domain
@@ -150,6 +155,9 @@ shows a public, forward-auth service with no `backend` at all.)
   and the per-service `backup` check.
 - `snapshot_max_age_hours` — how old the newest snapshot may be before
   `backup` turns into a finding.
+- `undeclared_is_failure` — optional, default `false`. `true` is strict
+  mode: a service with neither a `[service.factory_login]` probe nor a
+  `no_factory_login` reason is `failed` (exit 1) instead of `undeclared`.
 - `[[service]]` — one entry per service:
   - `key` — the name used on the command line and in the output.
   - `host` — the public DNS name (also used for `dig` and `curl` even when
@@ -169,6 +177,70 @@ shows a public, forward-auth service with no `backend` at all.)
     `method` defaults to `GET`. Either `body` (with `content_type`) or
     `user`/`password` (HTTP basic auth), never both. `reject` lists the HTTP
     status codes that mean the account was correctly refused.
+    `reject_body` — optional, a non-empty substring: when set, a response
+    counts as rejected only if its status is in `reject` AND its body
+    contains the substring. A status in `reject` without the text is
+    `failed` — the door may be open.
+  - `no_factory_login` — optional, a non-empty reason: the service ships
+    without a factory account, or its local login is switched off, and
+    somebody wrote down why. `factory-login` is then `n/a: <reason>` and
+    nothing is tried. Declaring it next to `[service.factory_login]` is a
+    configuration error, and so is an empty or whitespace-only reason.
+
+### Factory login: probe, exception, strict
+
+A service that rejects a wrong login with a status code needs nothing but
+`reject`. Some answer HTTP 200 either way and say it in the body —
+qBittorrent answers `Fails.` to a wrong login and `Ok.` to a right one:
+
+```toml
+[[service]]
+key = "qbittorrent"
+# …
+
+[service.factory_login]
+method = "POST"
+path = "/api/v2/auth/login"
+content_type = "application/x-www-form-urlencoded"
+body = "username=admin&password=adminadmin"
+reject = [200]
+reject_body = "Fails."
+```
+
+```
+qbittorrent     factory-login   ok               HTTP 200 with the expected rejection text: factory account rejected
+qbittorrent     factory-login   failed           HTTP 200, but the body (28 bytes) lacks the expected rejection text — the door may be open
+```
+
+The body itself is never printed, only its length: the answer to an
+ACCEPTED login is a session token, and the report ends up in a terminal,
+the journal and an alert mail. The body is read under the limit for
+everything a guest answers (1 MiB, see below); a longer one is `cannot
+measure`. Without `reject_body` curl discards the body as before.
+
+A service with no factory account at all gets a reason instead of a probe:
+
+```toml
+[[service]]
+key = "radarr"
+# …
+no_factory_login = "authentication is external, there is no local account"
+```
+
+```
+radarr          factory-login   n/a              authentication is external, there is no local account
+```
+
+And once every service carries one of the two, the top-level switch keeps
+it that way — a new service without either turns the run red:
+
+```toml
+undeclared_is_failure = true
+```
+
+```
+radarr          factory-login   failed           neither a factory_login probe nor a no_factory_login reason is declared (undeclared_is_failure)
+```
 
 ## Controls
 
@@ -202,8 +274,10 @@ finding about the network, not about the service.
 ## Exit codes
 
 - **0** — every measurement ran, every verdict was `ok`, `n/a` or
-  `undeclared`.
-- **1** — every measurement ran, at least one was `failed`.
+  `undeclared` (the last only without `undeclared_is_failure`).
+- **1** — every measurement ran, at least one was `failed` — with
+  `undeclared_is_failure = true` that includes a service with neither a
+  `factory_login` probe nor a `no_factory_login` reason.
 - **2** — a control failed, or at least one measurement could not be taken
   (`cannot measure`) — the run says nothing complete. Also used for a
   command-line error, a config that fails to load, or an unknown service

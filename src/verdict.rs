@@ -2,7 +2,9 @@
 //!
 //! `n/a` and `undeclared` never change the exit code: the first says the
 //! question does not apply to this service, the second says nobody has
-//! declared a probe yet — visible, but not a finding.
+//! declared a probe yet — visible, but not a finding. (In strict mode,
+//! `undeclared_is_failure`, the caller turns that `undeclared` into a
+//! `failed` before it gets here; the counting below does not change.)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {

@@ -27,10 +27,29 @@ pub fn rc(backend: &str, f: &FactoryLogin) -> CurlRc {
     if let (Some(u), Some(p)) = (&f.user, &f.password) {
         rc = rc.user(u, p);
     }
-    rc.code_only().max_time(15)
+    // With `reject_body` the answer is decided by what the body says, so the
+    // body has to come back; without it only the status does.
+    if f.reject_body.is_some() {
+        rc.body_then_code().max_time(15)
+    } else {
+        rc.code_only().max_time(15)
+    }
 }
 
-pub fn judge(out: &Output, reject: &[u16]) -> Verdict {
+/// What `Verdict::Undeclared` says by default, and what it says in strict
+/// mode (`undeclared_is_failure`), where it is a finding.
+pub const UNDECLARED: &str = "no probe in lib/werkskonten.nix";
+pub const UNDECLARED_STRICT: &str = "neither a factory_login probe nor a no_factory_login reason is declared (undeclared_is_failure)";
+
+/// `reject_body`: `None` — the status alone decides, as before. `Some` —
+/// stdout is the body followed by the status on a last line of its own
+/// (`CurlRc::body_then_code`), and a status in `reject` only counts when
+/// the body contains the substring.
+///
+/// The body itself never goes into a verdict: a login that was ACCEPTED
+/// answers with a session token, and the report ends up in a terminal, the
+/// journal and an alert mail. Its length is all that is said about it.
+pub fn judge(out: &Output, reject: &[u16], reject_body: Option<&str>) -> Verdict {
     if out.code != Some(0) {
         return Verdict::CannotMeasure(format!(
             "curl exit {:?}: {}",
@@ -38,34 +57,71 @@ pub fn judge(out: &Output, reject: &[u16]) -> Verdict {
             out.stderr.trim().lines().next().unwrap_or("")
         ));
     }
-    let code: u16 = match out.stdout.trim().parse() {
+    let (body, status) = match reject_body {
+        None => (None, out.stdout.trim()),
+        Some(_) => match out.stdout.rsplit_once('\n') {
+            Some((body, status)) => (Some(body), status.trim()),
+            None => (Some(out.stdout.as_str()), ""),
+        },
+    };
+    let code: u16 = match status.parse() {
         Ok(c) => c,
         Err(_) => {
-            return Verdict::CannotMeasure(format!(
-                "curl printed {:?} instead of a status",
-                out.stdout.trim()
-            ));
+            return Verdict::CannotMeasure(match body {
+                None => format!("curl printed {status:?} instead of a status"),
+                Some(_) => format!(
+                    "curl printed no status after the body ({} bytes of output)",
+                    out.stdout.len()
+                ),
+            });
         }
     };
-    if reject.contains(&code) {
-        Verdict::Ok(format!("HTTP {code}: factory account rejected"))
-    } else if code == 200 {
-        Verdict::Failed("factory account ACCEPTED (HTTP 200) — the door is open".into())
-    } else {
-        Verdict::Failed(format!("unexpected HTTP {code} — the probe proves nothing"))
+    if !reject.contains(&code) {
+        return if code == 200 {
+            Verdict::Failed("factory account ACCEPTED (HTTP 200) — the door is open".into())
+        } else {
+            Verdict::Failed(format!("unexpected HTTP {code} — the probe proves nothing"))
+        };
+    }
+    match (body, reject_body) {
+        (Some(body), Some(expected)) if !body.contains(expected) => Verdict::Failed(format!(
+            "HTTP {code}, but the body ({} bytes) lacks the expected rejection text — the door may be open",
+            body.len()
+        )),
+        (Some(_), Some(_)) => Verdict::Ok(format!(
+            "HTTP {code} with the expected rejection text: factory account rejected"
+        )),
+        _ => Verdict::Ok(format!("HTTP {code}: factory account rejected")),
     }
 }
 
 pub fn check(r: &dyn Runner, s: &Service) -> Verdict {
+    // The written-down exception: nothing to try, and somebody said why.
+    if let Some(reason) = &s.no_factory_login {
+        return Verdict::NotApplicable(reason.clone());
+    }
     let Some(f) = &s.factory_login else {
-        return Verdict::Undeclared("no probe in lib/werkskonten.nix".into());
+        return Verdict::Undeclared(UNDECLARED.into());
     };
     let Some(backend) = &s.backend else {
         return Verdict::CannotMeasure("factory_login declared but no backend".into());
     };
+    // `Limits::GUEST` (inside `host_curl_in_netns`) caps the body: a service
+    // that answers with more than 1 MiB is `cannot measure`, not a full heap.
     match guest::host_curl_in_netns(r, &s.guest, &rc(backend, f)) {
-        Ok(out) => judge(&out, &f.reject),
+        Ok(out) => judge(&out, &f.reject, f.reject_body.as_deref()),
         Err(e) => Verdict::CannotMeasure(e),
+    }
+}
+
+/// Strict mode: `undeclared` becomes a finding. Every other verdict passes
+/// through untouched — in particular the `n/a` of a declared exception.
+pub fn strict(v: Verdict, undeclared_is_failure: bool) -> Verdict {
+    match v {
+        Verdict::Undeclared(_) if undeclared_is_failure => {
+            Verdict::Failed(UNDECLARED_STRICT.into())
+        }
+        v => v,
     }
 }
 
@@ -116,6 +172,7 @@ mod tests {
             user: Some("admin".into()),
             password: Some("admin".into()),
             reject: vec![401, 403],
+            reject_body: None,
         };
         let text = String::from_utf8(rc("10.0.120.10:28981", &f).render()).unwrap();
         assert!(text.contains("user = \"admin:admin\"\n"));
@@ -125,19 +182,19 @@ mod tests {
     #[test]
     fn rejected_is_ok_accepted_is_the_finding_anything_else_proves_nothing() {
         assert_eq!(
-            judge(&out(0, "401", ""), &[401, 403]),
+            judge(&out(0, "401", ""), &[401, 403], None),
             Verdict::Ok("HTTP 401: factory account rejected".into())
         );
         assert_eq!(
-            judge(&out(0, "200", ""), &[401, 403]),
+            judge(&out(0, "200", ""), &[401, 403], None),
             Verdict::Failed("factory account ACCEPTED (HTTP 200) — the door is open".into())
         );
         assert_eq!(
-            judge(&out(0, "500", ""), &[401, 403]),
+            judge(&out(0, "500", ""), &[401, 403], None),
             Verdict::Failed("unexpected HTTP 500 — the probe proves nothing".into())
         );
         assert!(matches!(
-            judge(&out(7, "000", "curl: (7) Failed to connect"), &[401]),
+            judge(&out(7, "000", "curl: (7) Failed to connect"), &[401], None),
             Verdict::CannotMeasure(_)
         ));
     }
@@ -160,6 +217,124 @@ mod tests {
             check(&fake, c.service("radarr").unwrap()),
             Verdict::Undeclared("no probe in lib/werkskonten.nix".into())
         );
+    }
+
+    /// qBittorrent answers a wrong login with HTTP 200 and `Fails.`, a right
+    /// one with HTTP 200 and `Ok.` — the status says nothing.
+    #[test]
+    fn with_reject_body_the_status_alone_does_not_reject() {
+        let fails = Some("Fails.");
+        assert_eq!(
+            judge(&out(0, "Fails.\n200", ""), &[200], fails),
+            Verdict::Ok(
+                "HTTP 200 with the expected rejection text: factory account rejected".into()
+            )
+        );
+        assert_eq!(
+            judge(&out(0, "Ok.\n200", ""), &[200], fails),
+            Verdict::Failed(
+                "HTTP 200, but the body (3 bytes) lacks the expected rejection text — the door may be open".into()
+            )
+        );
+        // An empty body lacks the text, too.
+        assert_eq!(
+            judge(&out(0, "\n200", ""), &[200], fails),
+            Verdict::Failed(
+                "HTTP 200, but the body (0 bytes) lacks the expected rejection text — the door may be open".into()
+            )
+        );
+        // A body of several lines: only the LAST line is the status.
+        assert_eq!(
+            judge(
+                &out(0, "<html>\n401\nFails.\n</html>\n200", ""),
+                &[200],
+                fails
+            ),
+            Verdict::Ok(
+                "HTTP 200 with the expected rejection text: factory account rejected".into()
+            )
+        );
+        // A status outside `reject` is judged as before, whatever the body.
+        assert_eq!(
+            judge(&out(0, "Fails.\n500", ""), &[200], fails),
+            Verdict::Failed("unexpected HTTP 500 — the probe proves nothing".into())
+        );
+        assert_eq!(
+            judge(&out(0, "Fails.\n200", ""), &[401, 403], fails),
+            Verdict::Failed("factory account ACCEPTED (HTTP 200) — the door is open".into())
+        );
+    }
+
+    #[test]
+    fn the_body_never_reaches_a_verdict() {
+        let secret = "{\"authToken\":\"s3cr3t-session-token\"}";
+        for stdout in [
+            format!("{secret}\n200"),
+            // No status line at all: the old message quoted stdout.
+            secret.to_string(),
+            format!("{secret}\nnot-a-status"),
+        ] {
+            let v = judge(&out(0, &stdout, ""), &[200], Some("Fails."));
+            assert!(!v.detail().contains("s3cr3t"), "{v:?}");
+            assert!(!v.detail().contains("authToken"), "{v:?}");
+            assert_ne!(v.label(), "ok", "{v:?}");
+        }
+        assert_eq!(
+            judge(&out(0, secret, ""), &[200], Some("Fails.")),
+            Verdict::CannotMeasure(
+                "curl printed no status after the body (36 bytes of output)".into()
+            )
+        );
+    }
+
+    #[test]
+    fn rc_asks_for_the_body_only_when_reject_body_is_declared() {
+        let c = cfg();
+        let mut f = c
+            .service("ghostfolio")
+            .unwrap()
+            .factory_login
+            .clone()
+            .unwrap();
+        let text = String::from_utf8(rc("10.0.190.10:3333", &f).render()).unwrap();
+        assert!(text.contains("output = \"/dev/null\"\n"), "{text}");
+        f.reject_body = Some("Fails.".into());
+        let text = String::from_utf8(rc("10.0.190.10:3333", &f).render()).unwrap();
+        assert!(!text.contains("output ="), "{text}");
+        assert!(text.contains("write-out = \"\\n%{http_code}\"\n"), "{text}");
+        assert!(text.ends_with("max-time = 15\n"), "{text}");
+        // The expected text is the judge's business, not curl's.
+        assert!(!text.contains("Fails."), "{text}");
+    }
+
+    #[test]
+    fn a_declared_exception_is_not_applicable_with_its_reason_and_runs_nothing() {
+        let c = cfg();
+        let mut s = c.service("radarr").unwrap().clone();
+        s.no_factory_login = Some("local login is disabled, OIDC only".into());
+        let fake = Fake::new();
+        assert_eq!(
+            check(&fake, &s),
+            Verdict::NotApplicable("local login is disabled, OIDC only".into())
+        );
+        assert!(fake.calls().is_empty());
+    }
+
+    #[test]
+    fn strict_turns_only_undeclared_into_a_finding() {
+        let undeclared = Verdict::Undeclared(UNDECLARED.into());
+        assert_eq!(strict(undeclared.clone(), false), undeclared);
+        assert_eq!(
+            strict(undeclared, true),
+            Verdict::Failed(UNDECLARED_STRICT.into())
+        );
+        for v in [
+            Verdict::Ok("HTTP 401: factory account rejected".into()),
+            Verdict::NotApplicable("no account".into()),
+            Verdict::CannotMeasure("curl exit Some(7): x".into()),
+        ] {
+            assert_eq!(strict(v.clone(), true), v);
+        }
     }
 
     #[test]

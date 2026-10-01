@@ -18,6 +18,11 @@ pub struct Config {
     pub outpost: String,
     pub rustic_profile: String,
     pub snapshot_max_age_hours: u64,
+    /// Strict mode: a service with neither a `factory_login` probe nor a
+    /// `no_factory_login` reason is a finding (`failed`, exit 1) instead of
+    /// the hint `undeclared`. Off by default.
+    #[serde(default)]
+    pub undeclared_is_failure: bool,
     #[serde(default)]
     pub service: Vec<Service>,
 }
@@ -34,6 +39,10 @@ pub struct Service {
     pub forward_auth: bool,
     pub dataset: String,
     pub factory_login: Option<FactoryLogin>,
+    /// The written-down exception: this service ships without a factory
+    /// account (or its local login is switched off), and this is why.
+    /// Excludes `factory_login` — a service has a probe or a reason.
+    pub no_factory_login: Option<String>,
 }
 
 fn get() -> String {
@@ -51,6 +60,10 @@ pub struct FactoryLogin {
     pub user: Option<String>,
     pub password: Option<String>,
     pub reject: Vec<u16>,
+    /// Some services answer a wrong login with HTTP 200 and a text
+    /// (qBittorrent: `Fails.`). When set, a response only counts as rejected
+    /// if its status is in `reject` AND its body contains this substring.
+    pub reject_body: Option<String>,
 }
 
 impl Service {
@@ -95,7 +108,29 @@ fn validate(c: &Config) -> Result<(), String> {
                 ));
             }
         }
+        if let Some(reason) = &s.no_factory_login {
+            if s.factory_login.is_some() {
+                return Err(format!(
+                    "config: service {:?}: no_factory_login and factory_login are both declared — a service has a probe or a reason, not both",
+                    s.key
+                ));
+            }
+            if reason.trim().is_empty() {
+                return Err(format!(
+                    "config: service {:?}: no_factory_login needs a reason, not an empty string",
+                    s.key
+                ));
+            }
+        }
         if let Some(f) = &s.factory_login {
+            // An empty substring is contained in every body: the check would
+            // silently be the status check again.
+            if f.reject_body.as_deref().is_some_and(str::is_empty) {
+                return Err(format!(
+                    "config: service {:?}: factory_login.reject_body must not be empty",
+                    s.key
+                ));
+            }
             if f.reject.is_empty() {
                 return Err(format!(
                     "config: service {:?}: factory_login.reject must list at least one status",
@@ -189,6 +224,61 @@ mod tests {
             "body = \"x\"\nuser = \"admin\"\npassword = \"admin\"",
         );
         assert!(parse(&t).unwrap_err().contains("either"));
+    }
+
+    #[test]
+    fn no_factory_login_is_a_reason_and_excludes_a_probe() {
+        let radarr = "dataset = \"rpool/guests/media-01\"\n";
+        let t = EXAMPLE.replace(
+            radarr,
+            &format!("{radarr}no_factory_login = \"local login is disabled, OIDC only\"\n"),
+        );
+        let c = parse(&t).unwrap();
+        assert_eq!(
+            c.service("radarr").unwrap().no_factory_login.as_deref(),
+            Some("local login is disabled, OIDC only")
+        );
+        assert!(c.service("ghostfolio").unwrap().no_factory_login.is_none());
+
+        // A reason next to a probe: one of the two is wrong.
+        let ghostfolio = "dataset = \"rpool/guests/fin-01\"\n";
+        let t = EXAMPLE.replace(
+            ghostfolio,
+            &format!("{ghostfolio}no_factory_login = \"no account\"\n"),
+        );
+        let e = parse(&t).unwrap_err();
+        assert!(e.contains("ghostfolio"), "{e}");
+        assert!(e.contains("both declared"), "{e}");
+
+        for empty in ["", "   ", "\\t"] {
+            let t = EXAMPLE.replace(radarr, &format!("{radarr}no_factory_login = \"{empty}\"\n"));
+            let e = parse(&t).unwrap_err();
+            assert!(e.contains("radarr"), "{e}");
+            assert!(e.contains("needs a reason"), "{e}");
+        }
+    }
+
+    #[test]
+    fn reject_body_is_optional_and_never_empty() {
+        let c = parse(EXAMPLE).unwrap();
+        let fl = c.service("ghostfolio").unwrap().factory_login.clone();
+        assert_eq!(fl.unwrap().reject_body, None);
+        let t = EXAMPLE.replace(
+            "reject = [401, 403]",
+            "reject = [200]\nreject_body = \"Fails.\"",
+        );
+        let c = parse(&t).unwrap();
+        let fl = c.service("ghostfolio").unwrap().factory_login.clone();
+        assert_eq!(fl.unwrap().reject_body.as_deref(), Some("Fails."));
+        let t = EXAMPLE.replace("reject = [401, 403]", "reject = [200]\nreject_body = \"\"");
+        assert!(parse(&t).unwrap_err().contains("reject_body"));
+    }
+
+    #[test]
+    fn undeclared_is_failure_defaults_to_false() {
+        assert!(!parse(EXAMPLE).unwrap().undeclared_is_failure);
+        let t = format!("undeclared_is_failure = true\n{EXAMPLE}");
+        assert!(parse(&t).unwrap().undeclared_is_failure);
     }
 
     #[test]

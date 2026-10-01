@@ -59,6 +59,14 @@ impl CurlRc {
             .push("output = \"/dev/null\"".into())
             .push("write-out = \"%{http_code}\"".into())
     }
+    /// The body on stdout, then the HTTP status on a last line of its own —
+    /// for a probe whose answer is decided by what the body says. The
+    /// caller's `Limits` cap how much body is read.
+    pub fn body_then_code(self) -> CurlRc {
+        self.push("silent".into())
+            .push("show-error".into())
+            .push("write-out = \"\\n%{http_code}\"".into())
+    }
     /// Only the body on stdout; a 4xx/5xx becomes curl exit 22.
     pub fn body_only(self) -> CurlRc {
         self.push("silent".into())
@@ -95,6 +103,17 @@ mod tests {
         assert_eq!(
             text,
             "url = \"https://ghostfolio.rusty-vault.de/\"\nresolve = \"ghostfolio.rusty-vault.de:443:77.42.71.141\"\nsilent\nshow-error\noutput = \"/dev/null\"\nwrite-out = \"%{http_code}\"\nmax-time = 15\n"
+        );
+    }
+
+    #[test]
+    fn body_then_code_keeps_the_body_and_ends_with_the_status() {
+        let rc = CurlRc::new("http://10.0.10.10:8080/api/v2/auth/login").body_then_code();
+        let text = String::from_utf8(rc.render()).unwrap();
+        assert!(!text.contains("output ="), "{text}");
+        assert!(
+            text.ends_with("silent\nshow-error\nwrite-out = \"\\n%{http_code}\"\n"),
+            "{text}"
         );
     }
 
