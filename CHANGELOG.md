@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 — 2026-10-03
+
+Grundhärtung aus dem IT-Sicherheits-Audit 3 des Homeservers (B149), ohne Verhaltensänderung: `unsafe_code` verboten, Flake-Checks `audit` (cargo-audit, Advisory-Datenbank als Flake-Eingang) und `deny` (cargo-deny: Bans, Quellen, Lizenzen), `SECURITY.md`, Renovate.
+
 ## 0.3.0 — 2026-10-01
 
 Befund B143 aus dem IT-Sicherheits-Audit 3 des Homeservers (`low`): Die
