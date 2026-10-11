@@ -18,6 +18,14 @@ pub struct Config {
     pub outpost: String,
     pub rustic_profile: String,
     pub snapshot_max_age_hours: u64,
+    /// Where the home connection's public IPv4 is kept, as the outside sees
+    /// it (one address, one line). The soll for every `dns_a = "home"`.
+    /// Required as soon as one public service declares it.
+    pub home_v4_file: Option<String>,
+    /// A NAME whose AAAA the same updater writes as the home names' AAAA —
+    /// the soll for every `dns_aaaa = "home"` (see `checks::dns::home_v6`).
+    /// Required as soon as one public service declares it.
+    pub home_v6_reference: Option<String>,
     /// Strict mode: a service with neither a `factory_login` probe nor a
     /// `no_factory_login` reason is a finding (`failed`, exit 1) instead of
     /// the hint `undeclared`. Off by default.
@@ -43,6 +51,22 @@ pub struct Service {
     /// account (or its local login is switched off), and this is why.
     /// Excludes `factory_login` — a service has a probe or a reason.
     pub no_factory_login: Option<String>,
+    /// Where the A record must point: the VPS (default, as before 0.4.0)
+    /// or the home connection.
+    #[serde(default)]
+    pub dns_a: Target,
+    /// Where the AAAA record must point, see `dns_a`.
+    #[serde(default)]
+    pub dns_aaaa: Target,
+}
+
+/// The expected destination of one address family of a public name.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Target {
+    #[default]
+    Vps,
+    Home,
 }
 
 fn get() -> String {
@@ -90,8 +114,36 @@ pub fn load(path: &Path) -> Result<Config, String> {
 }
 
 fn validate(c: &Config) -> Result<(), String> {
+    if let Some(f) = &c.home_v4_file
+        && !f.starts_with('/')
+    {
+        return Err(format!(
+            "config: home_v4_file {f:?} must be an absolute path"
+        ));
+    }
+    // A written-down address would be the soll forever, while the prefix
+    // rotates: the reference is a NAME the updater keeps current.
+    if let Some(name) = &c.home_v6_reference
+        && (name.trim().is_empty() || name.parse::<std::net::IpAddr>().is_ok())
+    {
+        return Err(format!(
+            "config: home_v6_reference {name:?} must be a host name, not an address"
+        ));
+    }
     let mut seen = std::collections::HashSet::new();
     for s in &c.service {
+        if s.public && s.dns_a == Target::Home && c.home_v4_file.is_none() {
+            return Err(format!(
+                "config: service {:?}: dns_a = \"home\" needs home_v4_file",
+                s.key
+            ));
+        }
+        if s.public && s.dns_aaaa == Target::Home && c.home_v6_reference.is_none() {
+            return Err(format!(
+                "config: service {:?}: dns_aaaa = \"home\" needs home_v6_reference",
+                s.key
+            ));
+        }
         if !seen.insert(&s.key) {
             return Err(format!("config: service key {:?} appears twice", s.key));
         }
@@ -279,6 +331,47 @@ mod tests {
         assert!(!parse(EXAMPLE).unwrap().undeclared_is_failure);
         let t = format!("undeclared_is_failure = true\n{EXAMPLE}");
         assert!(parse(&t).unwrap().undeclared_is_failure);
+    }
+
+    #[test]
+    fn dns_targets_default_to_the_vps() {
+        let c = parse(EXAMPLE).unwrap();
+        let g = c.service("ghostfolio").unwrap();
+        assert_eq!((g.dns_a, g.dns_aaaa), (Target::Vps, Target::Vps));
+        assert!(c.home_v4_file.is_none() && c.home_v6_reference.is_none());
+    }
+
+    #[test]
+    fn home_targets_need_their_source() {
+        let ghostfolio = "dataset = \"rpool/guests/fin-01\"\n";
+        let t = EXAMPLE.replace(
+            ghostfolio,
+            &format!("{ghostfolio}dns_a = \"home\"\ndns_aaaa = \"home\"\n"),
+        );
+        let e = parse(&t).unwrap_err();
+        assert!(e.contains("home_v4_file"), "{e}");
+        let t1 = format!("home_v4_file = \"/var/lib/hausadresse/v4\"\n{t}");
+        let e = parse(&t1).unwrap_err();
+        assert!(e.contains("home_v6_reference"), "{e}");
+        let t2 = format!("home_v6_reference = \"nur6.rusty-vault.de\"\n{t1}");
+        let c = parse(&t2).unwrap();
+        let g = c.service("ghostfolio").unwrap();
+        assert_eq!((g.dns_a, g.dns_aaaa), (Target::Home, Target::Home));
+        // A misspelt target is a config error, not a silent "vps".
+        let t3 = t2.replace("dns_a = \"home\"", "dns_a = \"haus\"");
+        assert!(parse(&t3).is_err());
+        // The reference is a name; a fixed address goes stale with the prefix.
+        let t4 = t2.replace("nur6.rusty-vault.de", "2001:db8::1");
+        assert!(parse(&t4).unwrap_err().contains("not an address"));
+        let t5 = t2.replace("\"/var/lib/hausadresse/v4\"", "\"hausadresse/v4\"");
+        assert!(parse(&t5).unwrap_err().contains("absolute"));
+    }
+
+    #[test]
+    fn home_target_on_a_non_public_service_needs_nothing() {
+        let radarr = "dataset = \"rpool/guests/media-01\"\n";
+        let t = EXAMPLE.replace(radarr, &format!("{radarr}dns_a = \"home\"\n"));
+        assert!(parse(&t).is_ok());
     }
 
     #[test]

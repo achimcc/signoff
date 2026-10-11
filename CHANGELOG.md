@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0 — 2026-10-11
+
+Seit dem Direktweg des Homeservers (VPS-Ablösung, 2026-10-08/09) zeigen A
+und AAAA der meisten öffentlichen Namen auf den Anschluss, ddclient führt
+sie nach. signoff erwartete weiter den VPS und meldete jeden Morgen
+31× `dns-a` und 31× `dns-aaaa` als Befund — mit der Hausadresse im Text,
+also im Journal.
+
+- **Ziel je Familie: `dns_a` / `dns_aaaa = "vps" | "home"`** je Dienst,
+  Vorgabe `"vps"` (unverändert). Ein Tippfehler ist ein
+  Konfigurationsfehler, kein stilles `"vps"`.
+- **`home` für A: `home_v4_file`** — die Datei mit der Außensicht der IPv4
+  (auf dem Wirt `/var/lib/hausadresse/v4`). Leer, keine Adresse, privat
+  oder die VPS-Adresse: `cannot measure`, ohne den Inhalt zu zitieren.
+- **`home` für AAAA: `home_v6_reference`** — der Name, dessen AAAA derselbe
+  Updater aus derselben Abfrage schreibt (`nur6.<zone>`). Er muss genau
+  eine AAAA tragen, nicht die des VPS und nicht die Antwort des Wildcards
+  (`signoff-wildcard-probe.<zone>`): Ein fehlender Referenz-Record wäre
+  sonst gleich jedem fehlenden Dienst-Record — gleich, aber falsch grün.
+  Gefragt wird der Wildcard, keine Liste von Cloudflare-Bereichen, die
+  veralten könnte.
+- **Keine Hausadresse in einer Zeile.** `ok` sagt „home address (Quelle)",
+  ein Befund nennt den VPS, wenn der Record dorthin zeigt, und sonst nur
+  „weicht ab" — eine fremde Adresse an ihrer Stelle kann eine ALTE
+  Hausadresse sein. `plan` nennt Datei bzw. Referenznamen.
+- Die Sollwerte werden je Lauf einmal geholt und nur, wenn ein
+  öffentlicher Dienst sie braucht.
+
 ## 0.3.1 — 2026-10-03
 
 Grundhärtung aus dem IT-Sicherheits-Audit 3 des Homeservers (B149), ohne Verhaltensänderung: `unsafe_code` verboten, Flake-Checks `audit` (cargo-audit, Advisory-Datenbank als Flake-Eingang) und `deny` (cargo-deny: Bans, Quellen, Lizenzen), `SECURITY.md`, Renovate.

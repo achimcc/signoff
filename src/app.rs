@@ -2,7 +2,7 @@
 
 use crate::checks::{backend, backup, dns, factory_login, outpost, public_path};
 use crate::cli::{Args, Cmd, USAGE};
-use crate::config::{Config, Service};
+use crate::config::{Config, Service, Target};
 use crate::runner::{Runner, System};
 use crate::verdict::{Finding, Summary, Verdict, format_line, sanitize};
 use std::io::Write;
@@ -12,7 +12,11 @@ pub const RULES: &str = "\
 signoff asks, per service, whether it is really done. Seven measurements:
 
   dns-a, dns-aaaa   dig @<resolver>: the name must resolve to the VPS (the zone
-                    carries a wildcard, so \"some record\" proves nothing)
+                    carries a wildcard, so \"some record\" proves nothing) — or,
+                    with dns_a/dns_aaaa = \"home\", to the home connection: A =
+                    the address in home_v4_file, AAAA = the one AAAA of the name
+                    home_v6_reference (which must be neither the VPS nor the
+                    wildcard's answer). A home address is never printed.
   public-path       curl --resolve <host>:443:<vps>: any HTTP status is ok — the
                     home proxy answered; curl exit 35 \"unrecognized name\" means the
                     VPS's default vhost refused: the name is not in the SNI map
@@ -164,6 +168,8 @@ pub fn check(
     // Fetched at the first forward-auth service, then reused: one token,
     // one provider list, one outpost list per run.
     let mut authentik: Option<Result<outpost::Authentik, String>> = None;
+    // The home sollwerte, once per run and only if a service needs them.
+    let home = dns::Home::fetch(r, cfg, services);
     let mut findings = Vec::new();
     for s in services {
         let key = s.key.clone();
@@ -172,11 +178,15 @@ pub fn check(
             check,
             verdict: v,
         };
-        emit(out, &mut findings, line("dns-a", dns::check_a(r, cfg, s)));
         emit(
             out,
             &mut findings,
-            line("dns-aaaa", dns::check_aaaa(r, cfg, s)),
+            line("dns-a", dns::check_a(r, cfg, s, &home)),
+        );
+        emit(
+            out,
+            &mut findings,
+            line("dns-aaaa", dns::check_aaaa(r, cfg, s, &home)),
         );
         emit(
             out,
@@ -241,15 +251,32 @@ pub fn plan(cfg: &Config, services: &[&Service], out: &mut dyn Write) {
                 out,
                 s,
                 "dns-a",
-                format!("dig {}", dns::args(&cfg.resolver, "A", &s.host).join(" ")),
+                format!(
+                    "dig {}{}",
+                    dns::args(&cfg.resolver, "A", &s.host).join(" "),
+                    match s.dns_a {
+                        Target::Vps => String::new(),
+                        Target::Home => format!(
+                            " (expected: the address in {})",
+                            cfg.home_v4_file.as_deref().unwrap_or("?")
+                        ),
+                    }
+                ),
             );
             row(
                 out,
                 s,
                 "dns-aaaa",
                 format!(
-                    "dig {}",
-                    dns::args(&cfg.resolver, "AAAA", &s.host).join(" ")
+                    "dig {}{}",
+                    dns::args(&cfg.resolver, "AAAA", &s.host).join(" "),
+                    match s.dns_aaaa {
+                        Target::Vps => String::new(),
+                        Target::Home => format!(
+                            " (expected: the AAAA of {})",
+                            cfg.home_v6_reference.as_deref().unwrap_or("?")
+                        ),
+                    }
                 ),
             );
             row(

@@ -35,7 +35,7 @@ need either one or more service keys or `--all`, never both.
 
 | Check | How | Only when |
 |---|---|---|
-| `dns-a`, `dns-aaaa` | `dig @<resolver>`: the name must resolve to the VPS — the zone carries a wildcard, so "some record" proves nothing | `public` |
+| `dns-a`, `dns-aaaa` | `dig @<resolver>`: the name must resolve to the VPS — the zone carries a wildcard, so "some record" proves nothing. With `dns_a`/`dns_aaaa = "home"` it must resolve to the home connection instead: A = the address in `home_v4_file`, AAAA = the single AAAA of `home_v6_reference` (which itself must be neither the VPS nor the wildcard's answer, else `cannot measure`). A home address is never printed | `public` |
 | `public-path` | `curl --resolve <host>:443:<vps>`: any HTTP status is ok, the home proxy answered; curl exit 35 "unrecognized name" means the VPS's default vhost refused — the name is not in the SNI map; curl exit 60/51 (certificate not verifiable, host not in the certificate) is a finding too, not `cannot measure` | `public` |
 | `backend` | `vantage probe --from <proxy guest> <guest>:<port>`: `answered` is ok; `refused` / `dropped at zone edge` / `dropped elsewhere` are findings | a `backend` and `backend_guest` are declared |
 | `outpost` | a proxy provider with `external_host https://<host>` exists and the embedded outpost carries it | `forward_auth` |
@@ -155,6 +155,16 @@ shows a public, forward-auth service with no `backend` at all.)
   and the per-service `backup` check.
 - `snapshot_max_age_hours` — how old the newest snapshot may be before
   `backup` turns into a finding.
+- `home_v4_file` — optional, required once a public service declares
+  `dns_a = "home"`: absolute path of a file holding the home connection's
+  public IPv4 as the outside sees it (one line). Its content is never
+  printed — the report goes to the journal.
+- `home_v6_reference` — optional, required once a public service declares
+  `dns_aaaa = "home"`: a host NAME whose AAAA the same updater writes as the
+  home names' AAAA (on the reference host `nur6.<zone>`, written by
+  ddclient). It must answer with exactly one AAAA, not the VPS and not the
+  wildcard's answer (asked as `signoff-wildcard-probe.<zone>`) — a missing
+  reference record would otherwise equal every missing home record.
 - `undeclared_is_failure` — optional, default `false`. `true` is strict
   mode: a service with neither a `[service.factory_login]` probe nor a
   `no_factory_login` reason is `failed` (exit 1) instead of `undeclared`.
@@ -165,6 +175,8 @@ shows a public, forward-auth service with no `backend` at all.)
   - `guest` — the guest the service itself runs in; `factory-login` runs
     in its network namespace (not with its programs).
   - `public` — whether `dns-a`, `dns-aaaa` and `public-path` apply.
+  - `dns_a`, `dns_aaaa` — optional, `"vps"` (default) or `"home"`: where
+    that family's record must point.
   - `backend` — the service's `ip:port` behind the reverse proxy, or absent
     if there is none (then `backend` is `n/a`).
   - `backend_guest` — the guest that IP belongs to, so `vantage probe` can
