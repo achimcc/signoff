@@ -10,8 +10,10 @@ use std::path::Path;
 pub struct Config {
     pub zone: String,
     pub resolver: String,
-    pub vps_v4: String,
-    pub vps_v6: String,
+    /// Where the router forwards public :443 to, as `ip:port` (IPv4): the
+    /// public listener of the reverse proxy in `caddy_guest`. `public-path`
+    /// connects there from inside that guest's network.
+    pub public_endpoint: String,
     pub caddy_guest: String,
     pub auth_guest: String,
     pub auth_api: String,
@@ -19,12 +21,12 @@ pub struct Config {
     pub rustic_profile: String,
     pub snapshot_max_age_hours: u64,
     /// Where the home connection's public IPv4 is kept, as the outside sees
-    /// it (one address, one line). The soll for every `dns_a = "home"`.
-    /// Required as soon as one public service declares it.
+    /// it (one address, one line). The soll for every public name's A.
+    /// Required as soon as one service is public.
     pub home_v4_file: Option<String>,
     /// A NAME whose AAAA the same updater writes as the home names' AAAA —
-    /// the soll for every `dns_aaaa = "home"` (see `checks::dns::home_v6`).
-    /// Required as soon as one public service declares it.
+    /// the soll for every public name's AAAA (see `checks::dns::home_v6`).
+    /// Required as soon as one service is public.
     pub home_v6_reference: Option<String>,
     /// Strict mode: a service with neither a `factory_login` probe nor a
     /// `no_factory_login` reason is a finding (`failed`, exit 1) instead of
@@ -51,22 +53,6 @@ pub struct Service {
     /// account (or its local login is switched off), and this is why.
     /// Excludes `factory_login` — a service has a probe or a reason.
     pub no_factory_login: Option<String>,
-    /// Where the A record must point: the VPS (default, as before 0.4.0)
-    /// or the home connection.
-    #[serde(default)]
-    pub dns_a: Target,
-    /// Where the AAAA record must point, see `dns_a`.
-    #[serde(default)]
-    pub dns_aaaa: Target,
-}
-
-/// The expected destination of one address family of a public name.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Target {
-    #[default]
-    Vps,
-    Home,
 }
 
 fn get() -> String {
@@ -100,6 +86,18 @@ impl Config {
     pub fn service(&self, key: &str) -> Option<&Service> {
         self.service.iter().find(|s| s.key == key)
     }
+    /// `public_endpoint` split into address and port (validated in `parse`).
+    pub fn public_endpoint_parts(&self) -> Option<(&str, u16)> {
+        ipv4_port(&self.public_endpoint)
+    }
+}
+
+/// `a.b.c.d:port`, or `None`.
+fn ipv4_port(s: &str) -> Option<(&str, u16)> {
+    let (ip, port) = s.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    (ip.split('.').count() == 4 && ip.split('.').all(|o| o.parse::<u8>().is_ok()))
+        .then_some((ip, port))
 }
 
 pub fn parse(text: &str) -> Result<Config, String> {
@@ -114,6 +112,27 @@ pub fn load(path: &Path) -> Result<Config, String> {
 }
 
 fn validate(c: &Config) -> Result<(), String> {
+    if ipv4_port(&c.public_endpoint).is_none() {
+        return Err(format!(
+            "config: public_endpoint {:?} is not ip:port",
+            c.public_endpoint
+        ));
+    }
+    // Every public name points home (ddclient): the soll for A and AAAA
+    // comes from these two, there is no other.
+    if let Some(s) = c.service.iter().find(|s| s.public) {
+        for (field, missing) in [
+            ("home_v4_file", c.home_v4_file.is_none()),
+            ("home_v6_reference", c.home_v6_reference.is_none()),
+        ] {
+            if missing {
+                return Err(format!(
+                    "config: service {:?} is public and needs {field}",
+                    s.key
+                ));
+            }
+        }
+    }
     if let Some(f) = &c.home_v4_file
         && !f.starts_with('/')
     {
@@ -132,33 +151,16 @@ fn validate(c: &Config) -> Result<(), String> {
     }
     let mut seen = std::collections::HashSet::new();
     for s in &c.service {
-        if s.public && s.dns_a == Target::Home && c.home_v4_file.is_none() {
-            return Err(format!(
-                "config: service {:?}: dns_a = \"home\" needs home_v4_file",
-                s.key
-            ));
-        }
-        if s.public && s.dns_aaaa == Target::Home && c.home_v6_reference.is_none() {
-            return Err(format!(
-                "config: service {:?}: dns_aaaa = \"home\" needs home_v6_reference",
-                s.key
-            ));
-        }
         if !seen.insert(&s.key) {
             return Err(format!("config: service key {:?} appears twice", s.key));
         }
-        if let Some(b) = &s.backend {
-            let ok = b.rsplit_once(':').is_some_and(|(ip, port)| {
-                port.parse::<u16>().is_ok()
-                    && ip.split('.').count() == 4
-                    && ip.split('.').all(|o| o.parse::<u8>().is_ok())
-            });
-            if !ok {
-                return Err(format!(
-                    "config: service {:?}: backend {b:?} is not ip:port",
-                    s.key
-                ));
-            }
+        if let Some(b) = &s.backend
+            && ipv4_port(b).is_none()
+        {
+            return Err(format!(
+                "config: service {:?}: backend {b:?} is not ip:port",
+                s.key
+            ));
         }
         if let Some(reason) = &s.no_factory_login {
             if s.factory_login.is_some() {
@@ -334,44 +336,70 @@ mod tests {
     }
 
     #[test]
-    fn dns_targets_default_to_the_vps() {
+    fn public_endpoint_is_ipv4_colon_port() {
         let c = parse(EXAMPLE).unwrap();
-        let g = c.service("ghostfolio").unwrap();
-        assert_eq!((g.dns_a, g.dns_aaaa), (Target::Vps, Target::Vps));
-        assert!(c.home_v4_file.is_none() && c.home_v6_reference.is_none());
+        assert_eq!(c.public_endpoint_parts(), Some(("10.0.20.11", 8443)));
+        for bad in [
+            "10.0.20.11",
+            "10.0.20.11:",
+            "10.0.20.11:65536",
+            "10.0.20:8443",
+            "10.0.20.256:8443",
+            "infra-01:8443",
+            "[2a01:4f9::1]:443",
+            "",
+        ] {
+            let t = EXAMPLE.replace("\"10.0.20.11:8443\"", &format!("{bad:?}"));
+            let e = parse(&t).unwrap_err();
+            assert!(e.contains("public_endpoint"), "{bad}: {e}");
+            assert!(e.contains("not ip:port"), "{bad}: {e}");
+        }
+        let t = EXAMPLE.replace("public_endpoint = \"10.0.20.11:8443\"\n", "");
+        assert!(parse(&t).unwrap_err().contains("public_endpoint"));
     }
 
     #[test]
-    fn home_targets_need_their_source() {
+    fn the_vps_fields_of_0_4_are_a_config_error() {
+        for old in [
+            "vps_v4 = \"77.42.71.141\"\n",
+            "vps_v6 = \"2a01:4f9:c013:5ee7::1\"\n",
+        ] {
+            let e = parse(&format!("{old}{EXAMPLE}")).unwrap_err();
+            assert!(e.contains("unknown field"), "{e}");
+        }
         let ghostfolio = "dataset = \"rpool/guests/fin-01\"\n";
-        let t = EXAMPLE.replace(
-            ghostfolio,
-            &format!("{ghostfolio}dns_a = \"home\"\ndns_aaaa = \"home\"\n"),
-        );
-        let e = parse(&t).unwrap_err();
-        assert!(e.contains("home_v4_file"), "{e}");
-        let t1 = format!("home_v4_file = \"/var/lib/hausadresse/v4\"\n{t}");
-        let e = parse(&t1).unwrap_err();
-        assert!(e.contains("home_v6_reference"), "{e}");
-        let t2 = format!("home_v6_reference = \"nur6.rusty-vault.de\"\n{t1}");
-        let c = parse(&t2).unwrap();
-        let g = c.service("ghostfolio").unwrap();
-        assert_eq!((g.dns_a, g.dns_aaaa), (Target::Home, Target::Home));
-        // A misspelt target is a config error, not a silent "vps".
-        let t3 = t2.replace("dns_a = \"home\"", "dns_a = \"haus\"");
-        assert!(parse(&t3).is_err());
-        // The reference is a name; a fixed address goes stale with the prefix.
-        let t4 = t2.replace("nur6.rusty-vault.de", "2001:db8::1");
-        assert!(parse(&t4).unwrap_err().contains("not an address"));
-        let t5 = t2.replace("\"/var/lib/hausadresse/v4\"", "\"hausadresse/v4\"");
-        assert!(parse(&t5).unwrap_err().contains("absolute"));
+        for old in ["dns_a = \"vps\"\n", "dns_aaaa = \"home\"\n"] {
+            let t = EXAMPLE.replace(ghostfolio, &format!("{ghostfolio}{old}"));
+            assert!(parse(&t).unwrap_err().contains("unknown field"));
+        }
     }
 
     #[test]
-    fn home_target_on_a_non_public_service_needs_nothing() {
-        let radarr = "dataset = \"rpool/guests/media-01\"\n";
-        let t = EXAMPLE.replace(radarr, &format!("{radarr}dns_a = \"home\"\n"));
-        assert!(parse(&t).is_ok());
+    fn a_public_service_needs_both_home_sources() {
+        let c = parse(EXAMPLE).unwrap();
+        assert_eq!(c.home_v4_file.as_deref(), Some("/var/lib/hausadresse/v4"));
+        assert_eq!(c.home_v6_reference.as_deref(), Some("nur6.rusty-vault.de"));
+        let ohne_v4 = EXAMPLE.replace("home_v4_file = \"/var/lib/hausadresse/v4\"\n", "");
+        let e = parse(&ohne_v4).unwrap_err();
+        assert!(e.contains("is public and needs home_v4_file"), "{e}");
+        let ohne_v6 = EXAMPLE.replace("home_v6_reference = \"nur6.rusty-vault.de\"\n", "");
+        let e = parse(&ohne_v6).unwrap_err();
+        assert!(e.contains("is public and needs home_v6_reference"), "{e}");
+        // The reference is a name; a fixed address goes stale with the prefix.
+        let t = EXAMPLE.replace("\"nur6.rusty-vault.de\"", "\"2001:db8::1\"");
+        assert!(parse(&t).unwrap_err().contains("not an address"));
+        let t = EXAMPLE.replace("\"/var/lib/hausadresse/v4\"", "\"hausadresse/v4\"");
+        assert!(parse(&t).unwrap_err().contains("absolute"));
+    }
+
+    #[test]
+    fn without_a_public_service_the_home_sources_are_optional() {
+        let t = EXAMPLE
+            .replace("home_v4_file = \"/var/lib/hausadresse/v4\"\n", "")
+            .replace("home_v6_reference = \"nur6.rusty-vault.de\"\n", "")
+            .replace("public = true", "public = false");
+        let c = parse(&t).unwrap();
+        assert!(c.home_v4_file.is_none() && c.home_v6_reference.is_none());
     }
 
     #[test]

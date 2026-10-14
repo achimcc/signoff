@@ -4,8 +4,8 @@ Is the service really done?
 
 A service that is deployed, green in `systemctl` and answering on its own
 port can still be unusable: its name resolves to the CDN's wildcard instead
-of the VPS, the VPS's SNI map does not know it, the reverse proxy cannot
-reach its backend across a zone edge, the identity provider's outpost does
+of the home connection, the public listener holds no certificate for it,
+the reverse proxy cannot reach its backend across a zone edge, the identity provider's outpost does
 not carry its provider, no backup snapshot exists yet, or the vendor's
 default account still logs in. Each of these has happened here, each with a
 green deploy. `signoff check <service>` asks these questions live, in one
@@ -35,8 +35,8 @@ need either one or more service keys or `--all`, never both.
 
 | Check | How | Only when |
 |---|---|---|
-| `dns-a`, `dns-aaaa` | `dig @<resolver>`: the name must resolve to the VPS — the zone carries a wildcard, so "some record" proves nothing. With `dns_a`/`dns_aaaa = "home"` it must resolve to the home connection instead: A = the address in `home_v4_file`, AAAA = the single AAAA of `home_v6_reference` (which itself must be neither the VPS nor the wildcard's answer, else `cannot measure`). A home address is never printed | `public` |
-| `public-path` | `curl --resolve <host>:443:<vps>`: any HTTP status is ok, the home proxy answered; curl exit 35 "unrecognized name" means the VPS's default vhost refused — the name is not in the SNI map; curl exit 60/51 (certificate not verifiable, host not in the certificate) is a finding too, not `cannot measure` | `public` |
+| `dns-a`, `dns-aaaa` | `dig @<resolver>`: the name must resolve to the home connection — the zone carries a wildcard, so "some record" proves nothing. A = the address in `home_v4_file`, AAAA = the single AAAA of `home_v6_reference` (which itself must not be the wildcard's answer, else `cannot measure`). A home address is never printed, nor is a foreign address found in its place | `public` |
+| `public-path` | the HOST's `curl` in the network namespace of `caddy_guest` (`nsenter -t <leader> -n`), `resolve <host>:<port>:<ip>` on `public_endpoint`, `https://<host>:<port>/`: any HTTP status is ok — Caddy holds a certificate for the name and answered; curl exit 35 "tlsv1 alert internal error" means Caddy refused the handshake — the name is not served on the public listener; curl exit 60/51 (certificate not verifiable, host not in the certificate) is a finding too, not `cannot measure`. **Not measured:** the router's forward from public :443 to `public_endpoint` | `public` |
 | `backend` | `vantage probe --from <proxy guest> <guest>:<port>`: `answered` is ok; `refused` / `dropped at zone edge` / `dropped elsewhere` are findings | a `backend` and `backend_guest` are declared |
 | `outpost` | a proxy provider with `external_host https://<host>` exists and the embedded outpost carries it | `forward_auth` |
 | `backup` | the newest rustic snapshot for the guest's dataset is younger than `snapshot_max_age_hours` | always |
@@ -59,9 +59,9 @@ need either one or more service keys or `--all`, never both.
 
 ```
 $ signoff check ghostfolio
-ghostfolio      dns-a           ok               77.42.71.141
-ghostfolio      dns-aaaa        ok               2a01:4f9:c013:5ee7::1
-ghostfolio      public-path     ok               HTTP 302 via 77.42.71.141
+ghostfolio      dns-a           ok               home address (/var/lib/hausadresse/v4)
+ghostfolio      dns-aaaa        ok               home address (AAAA of nur6.rusty-vault.de)
+ghostfolio      public-path     ok               HTTP 302 via 10.0.20.11:8443
 ghostfolio      backend         ok               answered 301 (infra-01 -> fin-01:3333)
 ghostfolio      outpost         ok               provider 126 "Ghostfolio (Forward-Auth)" attached to authentik Embedded Outpost
 ghostfolio      backup          ok               newest 2026-09-23T04:40:35.297023632+02:00, 5 h old (2 snapshots)
@@ -85,8 +85,9 @@ configuration to `/etc/signoff.toml`. Top-level fields:
 ```toml
 zone = "rusty-vault.de"
 resolver = "1.1.1.1"
-vps_v4 = "77.42.71.141"
-vps_v6 = "2a01:4f9:c013:5ee7::1"
+public_endpoint = "10.0.20.11:8443"
+home_v4_file = "/var/lib/hausadresse/v4"
+home_v6_reference = "nur6.rusty-vault.de"
 caddy_guest = "infra-01"
 auth_guest = "auth-01"
 auth_api = "http://127.0.0.1:9000/api/v3"
@@ -141,10 +142,11 @@ shows a public, forward-auth service with no `backend` at all.)
   `public-path`'s canary invents a name in.
 - `resolver` — the recursive resolver `dig` asks, so the answer comes from
   outside, not from a split-horizon view on the host itself.
-- `vps_v4` / `vps_v6` — the VPS's public addresses; `dns-a`/`dns-aaaa` must
-  resolve to exactly these.
+- `public_endpoint` — `ip:port` (IPv4) the router forwards public :443 to:
+  the reverse proxy's public listener. `public-path` and the canary connect
+  there, from inside `caddy_guest`'s network.
 - `caddy_guest` — the guest that runs the reverse proxy; `backend` probes
-  *from* here.
+  *from* here, `public-path` runs in its network namespace.
 - `auth_guest` — the guest that runs the identity provider; the Authentik
   token is minted and the API is called from inside it.
 - `auth_api` — the identity provider's API base URL, reached from inside
@@ -155,15 +157,13 @@ shows a public, forward-auth service with no `backend` at all.)
   and the per-service `backup` check.
 - `snapshot_max_age_hours` — how old the newest snapshot may be before
   `backup` turns into a finding.
-- `home_v4_file` — optional, required once a public service declares
-  `dns_a = "home"`: absolute path of a file holding the home connection's
+- `home_v4_file` — required as soon as one service is `public`: absolute path of a file holding the home connection's
   public IPv4 as the outside sees it (one line). Its content is never
   printed — the report goes to the journal.
-- `home_v6_reference` — optional, required once a public service declares
-  `dns_aaaa = "home"`: a host NAME whose AAAA the same updater writes as the
-  home names' AAAA (on the reference host `nur6.<zone>`, written by
-  ddclient). It must answer with exactly one AAAA, not the VPS and not the
-  wildcard's answer (asked as `signoff-wildcard-probe.<zone>`) — a missing
+- `home_v6_reference` — required as soon as one service is `public`: a
+  host NAME whose AAAA the same updater writes as the home names' AAAA (on
+  the reference host `nur6.<zone>`, written by ddclient). It must answer
+  with exactly one AAAA, not the wildcard's answer (asked as `signoff-wildcard-probe.<zone>`) — a missing
   reference record would otherwise equal every missing home record.
 - `undeclared_is_failure` — optional, default `false`. `true` is strict
   mode: a service with neither a `[service.factory_login]` probe nor a
@@ -175,8 +175,6 @@ shows a public, forward-auth service with no `backend` at all.)
   - `guest` — the guest the service itself runs in; `factory-login` runs
     in its network namespace (not with its programs).
   - `public` — whether `dns-a`, `dns-aaaa` and `public-path` apply.
-  - `dns_a`, `dns_aaaa` — optional, `"vps"` (default) or `"home"`: where
-    that family's record must point.
   - `backend` — the service's `ip:port` behind the reverse proxy, or absent
     if there is none (then `backend` is `n/a`).
   - `backend_guest` — the guest that IP belongs to, so `vantage probe` can
@@ -265,9 +263,10 @@ finding about the network, not about the service.
 1. **SOA** — the resolver answers `SOA` for the zone at all. Otherwise "no
    A record" would be a statement about the resolver, not the zone.
 2. **Canary** — an invented, never-declared name under the zone must be
-   *refused* by the VPS (curl exit 35, "unrecognized name"). If it is not,
-   a `200` for a real service proves nothing: the VPS could be answering
-   for anything.
+   *refused* by the public listener, the same way `public-path` asks
+   (curl exit 35, "tlsv1 alert internal error": Caddy has no certificate
+   for it). If it is not, a `200` for a real service proves nothing: the
+   listener could be answering for anything.
 3. **Repository** — `rustic snapshots` lists something at all, for any
    dataset. Otherwise "no snapshot for `<dataset>`" would be a statement
    about a broken repository, not about that one guest.
@@ -298,9 +297,10 @@ finding about the network, not about the service.
 ## Limits and privileges
 
 - **Every command has a limit of its own, set per call**: what a guest
-  answers (`systemd-run --machine`, `nsenter -n … curl`, `vantage`) 120 s
-  and at most 1 MiB per stream (stdout, stderr); the host's own tools
-  (`dig`, `curl` of `public-path`, `machinectl`) 120 s and 64 MiB; `rustic`
+  answers (`systemd-run --machine`, `nsenter -n … curl` of `public-path`
+  and `factory-login`, `vantage`) 120 s and at most 1 MiB per stream
+  (stdout, stderr); the host's own tools (`dig`, `machinectl`) 120 s and
+  64 MiB; `rustic`
   600 s and 64 MiB (it lists the whole repository). A command that runs
   longer or writes more is killed and its output discarded; the
   measurement reads `cannot measure`.
@@ -313,7 +313,8 @@ finding about the network, not about the service.
   names from Authentik); raw, an `ESC ] 52` would write the clipboard of
   the terminal that reads the report.
 - **Privileges**: `systemd-run --machine` for the auth guest, `machinectl`
-  and `nsenter -n` for `factory-login` — the last needs `CAP_SYS_ADMIN`
+  and `nsenter -n` for `public-path`, the canary and `factory-login` — the
+  last needs `CAP_SYS_ADMIN`
   (setns) and `CAP_SYS_PTRACE` (the leader's namespace file).
 
 ## What it does not do
@@ -324,10 +325,13 @@ finding about the network, not about the service.
 - **No DNS client of its own.** Every `dns-a`/`dns-aaaa` answer comes from
   `dig` against the configured `resolver`; `signoff` does not speak the DNS
   wire protocol.
-- **No reading of the VPS's configuration.** `public-path` and the canary
-  control only ever observe the VPS's *behaviour* over the network
-  (`curl --resolve`); `signoff` never reads `hosts/vps/ingress.nix` or logs
-  in anywhere to inspect the SNI map directly.
+- **No measurement from outside.** `public-path` stands where Caddy stands
+  (its guest's network), not on the internet: the router's DNAT from public
+  :443 to `public_endpoint` and the home connection itself are not
+  measured. A probe from outside belongs elsewhere.
+- **No reading of the proxy's configuration.** `public-path` and the canary
+  control only ever observe Caddy's *behaviour* over the network; `signoff`
+  never reads a Caddyfile to see which names it serves.
 
 ## License
 

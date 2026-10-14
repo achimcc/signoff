@@ -2,7 +2,7 @@
 
 use crate::checks::{backend, backup, dns, factory_login, outpost, public_path};
 use crate::cli::{Args, Cmd, USAGE};
-use crate::config::{Config, Service, Target};
+use crate::config::{Config, Service};
 use crate::runner::{Runner, System};
 use crate::verdict::{Finding, Summary, Verdict, format_line, sanitize};
 use std::io::Write;
@@ -11,15 +11,18 @@ use std::path::Path;
 pub const RULES: &str = "\
 signoff asks, per service, whether it is really done. Seven measurements:
 
-  dns-a, dns-aaaa   dig @<resolver>: the name must resolve to the VPS (the zone
-                    carries a wildcard, so \"some record\" proves nothing) — or,
-                    with dns_a/dns_aaaa = \"home\", to the home connection: A =
-                    the address in home_v4_file, AAAA = the one AAAA of the name
-                    home_v6_reference (which must be neither the VPS nor the
+  dns-a, dns-aaaa   dig @<resolver>: the name must resolve to the home connection
+                    (the zone carries a wildcard, so \"some record\" proves
+                    nothing): A = the address in home_v4_file, AAAA = the one
+                    AAAA of the name home_v6_reference (which must not be the
                     wildcard's answer). A home address is never printed.
-  public-path       curl --resolve <host>:443:<vps>: any HTTP status is ok — the
-                    home proxy answered; curl exit 35 \"unrecognized name\" means the
-                    VPS's default vhost refused: the name is not in the SNI map
+  public-path       the HOST's curl in the network of caddy_guest (nsenter -t
+                    <leader> -n), resolve <host>:<port>:<ip> on public_endpoint,
+                    https://<host>:<port>/: any HTTP status is ok — Caddy holds a
+                    certificate for the name and answered; curl exit 35 \"tlsv1
+                    alert internal error\" means Caddy refused the handshake: the
+                    name is not served on the public listener. The router's
+                    forward to public_endpoint is not measured.
   backend           vantage probe --from <proxy guest> <guest>:<port>: answered is
                     ok; refused / dropped at zone edge / dropped elsewhere are findings
   outpost           a proxy provider with external_host https://<host> exists and the
@@ -49,7 +52,8 @@ Verdicts:
 
 Controls, once per run, before any measurement (exit 2 if one fails):
   the resolver answers SOA for the zone; an invented name is refused by the
-  VPS (else a 200 proves nothing); the backup repository lists snapshots at all.
+  public listener (else a 200 proves nothing); the backup repository lists
+  snapshots at all.
 And once, at the first service with forward_auth (a run without one never
 fetches a token): authentik lists at least one proxy provider — an empty
 list means the token may see none, not that every service lacks one. The
@@ -252,15 +256,9 @@ pub fn plan(cfg: &Config, services: &[&Service], out: &mut dyn Write) {
                 s,
                 "dns-a",
                 format!(
-                    "dig {}{}",
+                    "dig {} (expected: the address in {})",
                     dns::args(&cfg.resolver, "A", &s.host).join(" "),
-                    match s.dns_a {
-                        Target::Vps => String::new(),
-                        Target::Home => format!(
-                            " (expected: the address in {})",
-                            cfg.home_v4_file.as_deref().unwrap_or("?")
-                        ),
-                    }
+                    cfg.home_v4_file.as_deref().unwrap_or("?")
                 ),
             );
             row(
@@ -268,25 +266,25 @@ pub fn plan(cfg: &Config, services: &[&Service], out: &mut dyn Write) {
                 s,
                 "dns-aaaa",
                 format!(
-                    "dig {}{}",
+                    "dig {} (expected: the AAAA of {})",
                     dns::args(&cfg.resolver, "AAAA", &s.host).join(" "),
-                    match s.dns_aaaa {
-                        Target::Vps => String::new(),
-                        Target::Home => format!(
-                            " (expected: the AAAA of {})",
-                            cfg.home_v6_reference.as_deref().unwrap_or("?")
-                        ),
-                    }
+                    cfg.home_v6_reference.as_deref().unwrap_or("?")
                 ),
             );
             row(
                 out,
                 s,
                 "public-path",
-                format!(
-                    "curl … --resolve {}:443:{} https://{}/",
-                    s.host, cfg.vps_v4, s.host
-                ),
+                match cfg.public_endpoint_parts() {
+                    Some((ip, port)) => format!(
+                        "the host's curl in the network of {}: resolve {}:{port}:{ip} https://{}:{port}/",
+                        cfg.caddy_guest, s.host, s.host
+                    ),
+                    None => format!(
+                        "{:<16} public_endpoint {:?} is not ip:port",
+                        "cannot measure", cfg.public_endpoint
+                    ),
+                },
             );
         } else {
             for c in ["dns-a", "dns-aaaa", "public-path"] {
@@ -381,8 +379,21 @@ mod tests {
             stderr: stderr.into(),
         }
     }
+    const HOME_V4: &str = "198.51.100.7";
+    const HOME_V6: &str = "2001:db8:1::10";
+    /// The example config, with `home_v4_file` pointing at a file that holds
+    /// HOME_V4 — one file per call: tests run in parallel, and `fs::write`
+    /// truncates before it writes.
     fn cfg() -> Config {
-        parse(include_str!("../tests/answers/signoff.toml")).unwrap()
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pfad = std::env::temp_dir().join(format!("signoff-app-{}-{n}-v4", std::process::id()));
+        std::fs::write(&pfad, format!("{HOME_V4}\n")).unwrap();
+        parse(&include_str!("../tests/answers/signoff.toml").replace(
+            "\"/var/lib/hausadresse/v4\"",
+            &format!("{:?}", pfad.to_str().unwrap()),
+        ))
+        .unwrap()
     }
     fn noon() -> i64 {
         parse_rfc3339("2026-09-23T10:00:00+02:00").unwrap()
@@ -400,18 +411,28 @@ mod tests {
                 "SOA rusty-vault.de",
                 out(0, "ns. hostmaster. 1 2 3 4 5\n", ""),
             )
-            .on("dig", "AAAA", out(0, "2a01:4f9:c013:5ee7::1\n", ""))
-            .on("dig", " A ", out(0, "77.42.71.141\n", ""))
             .on(
-                "curl",
+                "dig",
+                "AAAA signoff-wildcard-probe",
+                out(0, "2606:4700:3030::6815:2001\n", ""),
+            )
+            .on("dig", "AAAA", out(0, &format!("{HOME_V6}\n"), ""))
+            .on("dig", " A ", out(0, &format!("{HOME_V4}\n"), ""))
+            .on(
+                "machinectl",
+                "infra-01 --property=Leader",
+                out(0, "1111\n", ""),
+            )
+            .on(
+                "nsenter",
                 "signoff-canary-",
                 out(
                     35,
                     "000",
-                    include_str!("../tests/answers/curl-35-unrecognized.txt"),
+                    include_str!("../tests/answers/curl-35-caddy-internal-error.txt"),
                 ),
             )
-            .on("curl", "https://", out(0, "302", ""))
+            .on("nsenter", "-t 1111 -n", out(0, "302", ""))
             .on(
                 "vantage",
                 "probe",
@@ -489,6 +510,30 @@ mod tests {
             lines[7],
             "7 ok, 0 failed, 0 n/a, 0 undeclared, 0 cannot measure"
         );
+        assert!(
+            lines[2].ends_with("HTTP 302 via 10.0.20.11:8443"),
+            "{}",
+            lines[2]
+        );
+        assert!(!text.contains(HOME_V4) && !text.contains(HOME_V6), "{text}");
+    }
+
+    #[test]
+    fn a_canary_the_public_listener_accepts_stops_the_run_with_exit_two() {
+        let c = cfg();
+        let fake = healthy_after(Fake::new().on("nsenter", "signoff-canary-", out(0, "200", "")));
+        let mut buf = Vec::new();
+        let code = check(
+            &fake,
+            &c,
+            &[c.service("ghostfolio").unwrap()],
+            noon(),
+            &mut buf,
+        );
+        assert_eq!(code, 2);
+        assert!(String::from_utf8(buf).unwrap().is_empty());
+        // SOA, Leader, Kanarienvogel — dann nichts mehr.
+        assert_eq!(fake.calls().len(), 3);
     }
 
     #[test]
@@ -598,60 +643,11 @@ mod tests {
     /// Rules are matched first-wins, so the failing vantage answer goes in
     /// front of everything `healthy()` would have said.
     fn with_dropped_backend() -> Fake {
-        let mut f = Fake::new().on(
+        healthy_after(Fake::new().on(
             "vantage",
             "probe",
             out(1, include_str!("../tests/answers/vantage-edge.txt"), ""),
-        );
-        f = f
-            .on(
-                "dig",
-                "SOA rusty-vault.de",
-                out(0, "ns. hostmaster. 1 2 3 4 5\n", ""),
-            )
-            .on("dig", "AAAA", out(0, "2a01:4f9:c013:5ee7::1\n", ""))
-            .on("dig", " A ", out(0, "77.42.71.141\n", ""))
-            .on(
-                "curl",
-                "signoff-canary-",
-                out(
-                    35,
-                    "000",
-                    include_str!("../tests/answers/curl-35-unrecognized.txt"),
-                ),
-            )
-            .on("curl", "https://", out(0, "302", ""))
-            .on("systemd-run", "authentik-kurztoken", out(0, "tok\n", ""))
-            .on(
-                "systemd-run",
-                "providers/proxy",
-                out(
-                    0,
-                    include_str!("../tests/answers/authentik-providers.json"),
-                    "",
-                ),
-            )
-            .on(
-                "systemd-run",
-                "outposts/instances",
-                out(
-                    0,
-                    include_str!("../tests/answers/authentik-outposts.json"),
-                    "",
-                ),
-            )
-            .on(
-                "machinectl",
-                "fin-01 --property=Leader",
-                out(0, "4242\n", ""),
-            )
-            .on("nsenter", "-t 4242 -n", out(0, "401", ""))
-            .on(
-                "rustic",
-                "",
-                out(0, include_str!("../tests/answers/rustic-fin-01.json"), ""),
-            );
-        f
+        ))
     }
 
     #[test]
@@ -694,7 +690,23 @@ mod tests {
             text.contains("dig +short +time=3 +tries=1 A ghostfolio.rusty-vault.de @1.1.1.1"),
             "{text}"
         );
-        assert!(text.contains("curl … --resolve ghostfolio.rusty-vault.de:443:77.42.71.141 https://ghostfolio.rusty-vault.de/"), "{text}");
+        assert!(
+            text.contains(
+                "ghostfolio      public-path     the host's curl in the network of infra-01: resolve ghostfolio.rusty-vault.de:8443:10.0.20.11 https://ghostfolio.rusty-vault.de:8443/"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(" A ghostfolio.rusty-vault.de @1.1.1.1 (expected: the address in "),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "AAAA ghostfolio.rusty-vault.de @1.1.1.1 (expected: the AAAA of nur6.rusty-vault.de)"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains(HOME_V4), "{text}");
         assert!(
             text.contains("vantage probe --from infra-01 fin-01:3333"),
             "{text}"

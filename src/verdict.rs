@@ -169,7 +169,10 @@ mod tests {
 
     #[test]
     fn exit_code_two_beats_one_beats_zero() {
-        let all_ok = Summary::of(&[f("dns-a", Verdict::Ok("77.42.71.141".into()))]);
+        let all_ok = Summary::of(&[f(
+            "dns-a",
+            Verdict::Ok("home address (/var/lib/hausadresse/v4)".into()),
+        )]);
         assert_eq!(all_ok.exit_code(), 0);
         let one_failed = Summary::of(&[
             f("dns-a", Verdict::Ok("x".into())),
@@ -201,11 +204,11 @@ mod tests {
     fn line_has_service_check_label_detail_in_columns() {
         let l = format_line(&f(
             "public-path",
-            Verdict::Ok("HTTP 302 via 77.42.71.141".into()),
+            Verdict::Ok("HTTP 302 via 10.0.20.11:8443".into()),
         ));
         assert_eq!(
             l,
-            "ghostfolio      public-path     ok               HTTP 302 via 77.42.71.141"
+            "ghostfolio      public-path     ok               HTTP 302 via 10.0.20.11:8443"
         );
         let l = format_line(&f(
             "outpost",

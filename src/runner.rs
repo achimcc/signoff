@@ -388,14 +388,14 @@ mod tests {
                 "",
                 Output {
                     code: Some(0),
-                    stdout: "77.42.71.141\n".into(),
+                    stdout: "198.51.100.7\n".into(),
                     stderr: String::new(),
                 },
             );
         let a = fake
             .run("dig", &["+short".into(), "A".into(), "x".into()], None)
             .unwrap();
-        assert_eq!(a.stdout, "77.42.71.141\n");
+        assert_eq!(a.stdout, "198.51.100.7\n");
         let aaaa = fake
             .run("dig", &["+short".into(), "AAAA".into(), "x".into()], None)
             .unwrap();

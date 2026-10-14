@@ -95,14 +95,14 @@ mod tests {
 
     #[test]
     fn renders_one_option_per_line_in_curl_config_syntax() {
-        let rc = CurlRc::new("https://ghostfolio.rusty-vault.de/")
-            .resolve("ghostfolio.rusty-vault.de", 443, "77.42.71.141")
+        let rc = CurlRc::new("https://ghostfolio.rusty-vault.de:8443/")
+            .resolve("ghostfolio.rusty-vault.de", 8443, "10.0.20.11")
             .code_only()
             .max_time(15);
         let text = String::from_utf8(rc.render()).unwrap();
         assert_eq!(
             text,
-            "url = \"https://ghostfolio.rusty-vault.de/\"\nresolve = \"ghostfolio.rusty-vault.de:443:77.42.71.141\"\nsilent\nshow-error\noutput = \"/dev/null\"\nwrite-out = \"%{http_code}\"\nmax-time = 15\n"
+            "url = \"https://ghostfolio.rusty-vault.de:8443/\"\nresolve = \"ghostfolio.rusty-vault.de:8443:10.0.20.11\"\nsilent\nshow-error\noutput = \"/dev/null\"\nwrite-out = \"%{http_code}\"\nmax-time = 15\n"
         );
     }
 

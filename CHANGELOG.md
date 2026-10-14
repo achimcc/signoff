@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.5.0 — 2026-10-14
+
+Der VPS wird gekündigt. Die öffentlichen Namen zeigen per A und AAAA
+(ddclient) auf den Hausanschluss, der Router leitet :443 per DNAT auf Caddy
+im Proxy-Gast weiter (`infra-01`, `10.0.20.11:8443`, v6 ebenso auf :8443).
+signoff fragte für `public-path` und den Kanarienvogel weiter den VPS und
+kannte für DNS das Ziel `"vps"` — beides misst nach der Kündigung nichts
+mehr.
+
+**Bricht die Konfiguration** (`deny_unknown_fields` bleibt: ein altes Feld
+ist ein Konfigurationsfehler, kein stilles Weiter-so):
+
+- **Entfernt: `vps_v4`, `vps_v6`** (oben) und **`dns_a`, `dns_aaaa`** (je
+  Dienst). Jeder öffentliche Name muss auf den Anschluss zeigen; ein
+  anderes Ziel gibt es nicht mehr.
+- **Neu: `public_endpoint = "ip:port"`** (IPv4, geprüft wie `backend`) —
+  die Adresse, auf die der Router öffentliches :443 weiterleitet.
+- **`home_v4_file` und `home_v6_reference` sind Pflicht**, sobald ein
+  Dienst `public = true` trägt; fehlt eins, ist es ein
+  Konfigurationsfehler.
+
+**`public-path` misst jetzt Caddys öffentlichen Listener**: das curl des
+WIRTS im Netz-Namensraum von `caddy_guest` (`nsenter -t <leader> -n`, wie
+`factory-login`; die Probe per stdin, nie in argv), `resolve
+<host>:<port>:<ip>` auf `public_endpoint`, `https://<host>:<port>/`. Jeder
+HTTP-Status ist `ok` („HTTP 302 via 10.0.20.11:8443"). curl-Exit 35 mit
+„tlsv1 alert internal error" ist Caddys Ablehnung eines Namens ohne
+Zertifikat — `failed`: der Name wird am öffentlichen Listener nicht
+bedient. Andere TLS-Fehler und 51/60 bleiben Befunde, alles andere
+`cannot measure`. Gemessen am 2026-10-14 im Netz von `infra-01`: echte
+Namen 404/302 mit Exit 0, ein erfundener Name
+`curl: (35) TLS connect error: error:0A000438:SSL routines::tlsv1 alert
+internal error` (jetzt `tests/answers/curl-35-caddy-internal-error.txt`;
+die Antwort des VPS, `curl-35-unrecognized.txt`, ist entfernt). Der
+**Kanarienvogel** geht denselben Weg und muss genau diesen Befund liefern.
+
+**Was `public-path` NICHT mehr misst:** den Weg von draußen. Den DNAT des
+Routers sieht die Probe nicht — sie steht, wo Caddy steht, und der Wirt hat
+keine Firewall-Kante zu `10.0.20.11:8443`. Ob die Weiterleitung trägt, ist
+eine Frage für eine Probe von außen; vorher bewies das der Weg über den
+VPS mit.
+
+**DNS:** `dns-a`/`dns-aaaa` vergleichen immer gegen den Anschluss.
+`judge` (feste Adresse) ist entfallen; ein Befund sagt nur noch „weicht
+von der Hausadresse ab, Adresse zurückgehalten" — auch die alte
+VPS-Adresse wird nicht mehr eigens benannt. Die Referenz für AAAA wird
+weiter gegen den Wildcard geprüft, nicht mehr gegen den VPS. Die Regel
+„keine Hausadresse in einer Zeile" bleibt unverändert.
+
 ## 0.4.0 — 2026-10-11
 
 Seit dem Direktweg des Homeservers (VPS-Ablösung, 2026-10-08/09) zeigen A

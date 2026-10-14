@@ -26,8 +26,7 @@ fn toml(top: &str, service: &str) -> String {
         r#"{top}
 zone = "rusty-vault.de"
 resolver = "1.1.1.1"
-vps_v4 = "77.42.71.141"
-vps_v6 = "2a01:4f9:c013:5ee7::1"
+public_endpoint = "10.0.20.11:8443"
 caddy_guest = "infra-01"
 auth_guest = "auth-01"
 auth_api = "http://127.0.0.1:9000/api/v3"
@@ -65,9 +64,18 @@ fn host(login: Output) -> Fake {
     Fake::new()
         .on("dig", "SOA", out(0, "ns. hostmaster. 1 2 3 4 5\n", ""))
         .on(
-            "curl",
+            "machinectl",
+            "infra-01 --property=Leader",
+            out(0, "1111\n", ""),
+        )
+        .on(
+            "nsenter",
             "signoff-canary-",
-            out(35, "000", include_str!("answers/curl-35-unrecognized.txt")),
+            out(
+                35,
+                "000",
+                include_str!("answers/curl-35-caddy-internal-error.txt"),
+            ),
         )
         .on(
             "vantage",
@@ -99,6 +107,11 @@ fn run(cfg: &Config, fake: &Fake) -> (i32, String) {
         &mut buf,
     );
     (code, String::from_utf8(buf).unwrap())
+}
+
+/// The login attempt: `nsenter` into dl-01's network (leader 4242).
+fn login_call(program: &str, argv: &[String]) -> bool {
+    program == "nsenter" && argv.join(" ").starts_with("-t 4242 -n")
 }
 
 fn factory_login_line(text: &str) -> &str {
@@ -142,8 +155,9 @@ fn b143_exception_is_not_applicable_with_its_reason() {
         text.ends_with("2 ok, 0 failed, 5 n/a, 0 undeclared, 0 cannot measure\n"),
         "{text}"
     );
+    // The canary control enters infra-01 (leader 1111), never dl-01.
     assert!(
-        fake.calls().iter().all(|(p, _, _)| p != "nsenter"),
+        fake.calls().iter().all(|(p, a, _)| !login_call(p, a)),
         "an exception must not try the door"
     );
     // … and strict mode has nothing to object to: it IS declared.
@@ -191,7 +205,7 @@ fn b143_reject_body_found_is_ok() {
     // The body is read under the narrow cap for what a guest answers, and
     // curl is asked for it (no `output = /dev/null`).
     let calls = fake.calls();
-    let n = calls.iter().position(|(p, _, _)| p == "nsenter").unwrap();
+    let n = calls.iter().position(|(p, a, _)| login_call(p, a)).unwrap();
     assert_eq!(fake.limits()[n], Limits::GUEST);
     let rc = String::from_utf8_lossy(calls[n].2.as_deref().unwrap()).into_owned();
     assert!(!rc.contains("/dev/null"), "{rc}");
