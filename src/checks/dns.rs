@@ -43,8 +43,18 @@ pub fn judge_home(out: &Output, rrtype: &str, home: &str, source: &str) -> Verdi
         return Verdict::CannotMeasure("home address does not parse".into());
     };
     let found = addresses(out);
+    // EXACTLY the home address (audit 4, B220). `contains` let a record set
+    // of home address PLUS a foreign one pass — and a resolver hands out
+    // either, so part of the traffic goes elsewhere. Duplicates are one
+    // address; the extra ones are withheld like any other foreign address.
     if found.contains(&home) {
-        return Verdict::Ok(format!("home address ({source})"));
+        let extra = found.iter().filter(|a| **a != home).count();
+        if extra == 0 {
+            return Verdict::Ok(format!("home address ({source})"));
+        }
+        return Verdict::Failed(format!(
+            "{rrtype} carries the home address ({source}) and {extra} more; addresses withheld — a stale record next to the current one, or a second record the zone does not own?"
+        ));
     }
     match found.first() {
         None => Verdict::Failed(format!("no {rrtype} record")),
@@ -303,6 +313,38 @@ mod tests {
         );
         let v = judge_home(&out(";; communications error", 9), "A", HOME_V4, SOURCE);
         assert!(matches!(v, Verdict::CannotMeasure(_)));
+    }
+
+    /// B220: home address AND a foreign one is not "the home address".
+    #[test]
+    fn an_additional_address_next_to_the_home_one_is_a_finding() {
+        let v = judge_home(
+            &out(&format!("{HOME_V4}\n203.0.113.7\n"), 0),
+            "A",
+            HOME_V4,
+            SOURCE,
+        );
+        let Verdict::Failed(d) = &v else {
+            panic!("{v:?}")
+        };
+        assert!(d.contains("and 1 more"), "{d}");
+        assert!(!d.contains("203.0.113") && !d.contains(HOME_V4), "{d}");
+        // Order does not matter, nor does the family.
+        let v = judge_home(
+            &out(&format!("2001:db8::99\n{HOME_V6}\n"), 0),
+            "AAAA",
+            HOME_V6,
+            SOURCE,
+        );
+        assert!(matches!(v, Verdict::Failed(_)), "{v:?}");
+        // The home address twice is still only the home address.
+        let v = judge_home(
+            &out(&format!("{HOME_V4}\n{HOME_V4}\n"), 0),
+            "A",
+            HOME_V4,
+            SOURCE,
+        );
+        assert!(matches!(v, Verdict::Ok(_)), "{v:?}");
     }
 
     #[test]

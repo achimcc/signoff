@@ -219,6 +219,35 @@ mod tests {
         );
     }
 
+    /// B219 (audit 4): qBittorrent bans the source address after five failed
+    /// logins and answers 403 from then on. With 403 in `reject` and no
+    /// `reject_body`, that ban counts as "factory pair rejected". Declared
+    /// with the rejection text, the ban's 403 is not green.
+    #[test]
+    fn a_foreign_403_without_the_rejection_text_is_not_green() {
+        let ban =
+            "Your IP address has been banned after too many failed authentication attempts.\n403";
+        let v = judge(&out(0, ban, ""), &[401, 403], Some("Fails."));
+        assert!(matches!(v, Verdict::Failed(_)), "{v:?}");
+        let Verdict::Failed(d) = &v else {
+            unreachable!()
+        };
+        assert!(
+            !d.contains("banned"),
+            "the body never goes into a verdict: {d}"
+        );
+        assert!(matches!(
+            judge(&out(0, "Fails.\n401", ""), &[401, 403], Some("Fails.")),
+            Verdict::Ok(_)
+        ));
+        // Without `reject_body` the status alone decides — the configuration
+        // has to declare the text, the tool cannot guess it.
+        assert!(matches!(
+            judge(&out(0, "403", ""), &[401, 403], None),
+            Verdict::Ok(_)
+        ));
+    }
+
     /// qBittorrent answers a wrong login with HTTP 200 and `Fails.`, a right
     /// one with HTTP 200 and `Ok.` — the status says nothing.
     #[test]

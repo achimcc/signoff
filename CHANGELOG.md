@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.1 — 2026-10-16
+
+Audit 4 des Homeservers (2026-10-15).
+
+- **B220: `dns-a`/`dns-aaaa` verlangen genau die Heimadresse.** Bisher genügte
+  es, dass sie unter den Antworten war; eine zweite, fremde Adresse daneben
+  (ein alter Eintrag, ein Eintrag, den die Zone nicht besitzt) blieb `ok`.
+  Jetzt `failed` mit der Zahl der zusätzlichen Adressen, ohne sie zu nennen.
+- **B219: Test für die Sperre von qBittorrent.** Mit `reject_body` ist ein
+  403 ohne den Abweisungstext (die IP-Sperre nach fünf Fehlversuchen) nicht
+  grün. Das Werkzeug konnte das schon; die Konfiguration muss den Text
+  deklarieren (oder 403 aus `reject` nehmen).
+
 ## 0.5.0 — 2026-10-14
 
 Der VPS wird gekündigt. Die öffentlichen Namen zeigen per A und AAAA
