@@ -16,6 +16,9 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The guest execution comes from vantage, pinned to its tag in Cargo.toml and
+# to its hash in flake.nix. No other git source is allowed.
+allow-git = ["https://github.com/achimcc/vantage"]
 
 [licenses]
 confidence-threshold = 0.8

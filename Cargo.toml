@@ -1,6 +1,6 @@
 [package]
 name = "signoff"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Is the service really done? Live acceptance checks for a self-hosted service"
@@ -11,6 +11,10 @@ lexopt = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# The guest execution (systemd-run argv with the three switches), the capture
+# loop and the curl quoting come from vantage. `version` beside the tag:
+# without it the requirement is `*`, and the `deny` check bans wildcards.
+vantage = { git = "https://github.com/achimcc/vantage", tag = "v0.4.2", version = "0.4.2" }
 
 [lints.rust]
 # No `unsafe` anywhere in this crate, and no `#[allow]` can bring it back.

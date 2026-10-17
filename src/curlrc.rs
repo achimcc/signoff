@@ -1,85 +1,66 @@
 //! A curl invocation written as a curl config file (`curl -K -`), so that
 //! nothing sensitive — a bearer token, a password — ever appears in argv,
 //! which `systemd-run` logs into the guest's journal.
+//!
+//! Since 0.5.2 the syntax comes from vantage (`vantage::curlrc::CurlRc`):
+//! the quoting function existed there, in gast-pruefung and here, byte for
+//! byte the same. What stays here are signoff's three idioms — only the
+//! status, body then status, body only.
 
-pub fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
+pub use vantage::curlrc::quote;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CurlRc {
-    lines: Vec<String>,
+    rc: vantage::curlrc::CurlRc,
 }
 
 impl CurlRc {
     pub fn new(url: &str) -> CurlRc {
         CurlRc {
-            lines: vec![format!("url = {}", quote(url))],
+            rc: vantage::curlrc::CurlRc::new(url),
         }
     }
-    fn push(mut self, line: String) -> CurlRc {
-        self.lines.push(line);
-        self
+    fn map(self, f: impl FnOnce(vantage::curlrc::CurlRc) -> vantage::curlrc::CurlRc) -> CurlRc {
+        CurlRc { rc: f(self.rc) }
     }
     pub fn header(self, name: &str, value: &str) -> CurlRc {
-        self.push(format!("header = {}", quote(&format!("{name}: {value}"))))
+        self.map(|rc| rc.header(name, value))
     }
     pub fn request(self, method: &str) -> CurlRc {
-        self.push(format!("request = {}", quote(method)))
+        self.map(|rc| rc.request(method))
     }
     pub fn data(self, body: &str) -> CurlRc {
-        self.push(format!("data = {}", quote(body)))
+        self.map(|rc| rc.data(body))
     }
     pub fn user(self, user: &str, password: &str) -> CurlRc {
-        self.push(format!("user = {}", quote(&format!("{user}:{password}"))))
+        self.map(|rc| rc.user(user, password))
     }
     pub fn resolve(self, host: &str, port: u16, ip: &str) -> CurlRc {
-        self.push(format!(
-            "resolve = {}",
-            quote(&format!("{host}:{port}:{ip}"))
-        ))
+        self.map(|rc| rc.resolve(host, port, ip))
     }
     /// Only the HTTP status on stdout.
     pub fn code_only(self) -> CurlRc {
-        self.push("silent".into())
-            .push("show-error".into())
-            .push("output = \"/dev/null\"".into())
-            .push("write-out = \"%{http_code}\"".into())
+        self.map(|rc| {
+            rc.silent_show_error()
+                .discard_body()
+                .write_out("%{http_code}")
+        })
     }
     /// The body on stdout, then the HTTP status on a last line of its own —
     /// for a probe whose answer is decided by what the body says. The
     /// caller's `Limits` cap how much body is read.
     pub fn body_then_code(self) -> CurlRc {
-        self.push("silent".into())
-            .push("show-error".into())
-            .push("write-out = \"\\n%{http_code}\"".into())
+        self.map(|rc| rc.silent_show_error().write_out("\n%{http_code}"))
     }
     /// Only the body on stdout; a 4xx/5xx becomes curl exit 22.
     pub fn body_only(self) -> CurlRc {
-        self.push("silent".into())
-            .push("show-error".into())
-            .push("fail".into())
+        self.map(|rc| rc.silent_show_error().fail())
     }
     pub fn max_time(self, secs: u32) -> CurlRc {
-        self.push(format!("max-time = {secs}"))
+        self.map(|rc| rc.max_time(secs))
     }
     pub fn render(&self) -> Vec<u8> {
-        let mut text = self.lines.join("\n");
-        text.push('\n');
-        text.into_bytes()
+        self.rc.render().into_bytes()
     }
 }
 

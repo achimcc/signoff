@@ -26,6 +26,9 @@
           version = (nixpkgs.lib.importTOML ./Cargo.toml).package.version;
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
+          # vantage comes from git, pinned to its tag in Cargo.toml; the hash is
+          # the one Cargo.lock's rev resolves to.
+          cargoLock.outputHashes."vantage-0.4.2" = "sha256-QIdidf72UtwCL8b9t7deKoMvrMWJh1Eaosp3pvFEb58=";
           meta = {
             description = "Is the service really done? Live acceptance checks for a self-hosted service";
             homepage = "https://github.com/achimcc/signoff";

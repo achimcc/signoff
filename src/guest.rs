@@ -17,18 +17,12 @@ pub const NSENTER: &str = "nsenter";
 pub const HOST_CURL: &str = "curl";
 pub const KURZTOKEN: &str = "/run/current-system/sw/bin/authentik-kurztoken";
 
+/// The systemd-run argv — since 0.5.2 from vantage, the one place that
+/// knows the three switches. The command still goes through signoff's own
+/// `Runner`, so the fakes of the tests see it like every other call.
 pub fn args(guest: &str, program: &str, args: &[&str]) -> Vec<String> {
-    let mut v: Vec<String> = vec![
-        format!("--machine={guest}"),
-        "--wait".into(),
-        "--pipe".into(),
-        "--quiet".into(),
-        "--collect".into(),
-        "--".into(),
-        program.into(),
-    ];
-    v.extend(args.iter().map(|a| a.to_string()));
-    v
+    let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    vantage::guest_run::systemd_run_argv(guest, program, &args)
 }
 
 pub fn run(

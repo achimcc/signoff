@@ -2,10 +2,8 @@
 //! replays recorded answers so the verdict logic is testable without a host.
 
 use std::cell::RefCell;
-use std::io::{Read, Write};
-use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Output {
@@ -86,18 +84,6 @@ pub trait Runner {
 /// einem `Err` `cannot measure`.
 pub struct System;
 
-/// Liest hoechstens `deckel + 1` Bytes aus `quelle` — das eine Byte mehr
-/// zeigt, dass der Deckel ueberschritten ist.
-fn lies_gedeckelt(quelle: impl Read + Send + 'static, deckel: usize) -> Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut v = Vec::new();
-        let _ = quelle.take(deckel as u64 + 1).read_to_end(&mut v);
-        let _ = tx.send(v);
-    });
-    rx
-}
-
 impl Runner for System {
     fn run_with(
         &self,
@@ -106,96 +92,32 @@ impl Runner for System {
         stdin: Option<&[u8]>,
         limits: Limits,
     ) -> Result<Output, String> {
+        // Seit 0.5.2 die Schleife aus vantage (`capture::run`): Frist und
+        // Deckel, beide Stroeme in eigenen Faeden, stdin im eigenen Faden,
+        // ein Enkel, der die Leitung haelt, endet an der Frist. Die
+        // Meldungen bleiben signoffs eigene — die Tests halten sie.
+        use vantage::capture::{CaptureError, Limits as L};
         let Limits { frist, deckel } = limits;
         let mut cmd = Command::new(program);
-        cmd.args(args)
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| format!("{program}: {e}"))?;
-        let ende = Instant::now() + frist;
-        // Beide Stroeme in eigenen Faeden: ein voller stderr darf stdout nicht
-        // blockieren. Die Faeden werden nie `join`t, sondern ueber einen Kanal
-        // mit Frist abgefragt — ein Enkel (der Prozess im Gast hinter
-        // `systemd-run --pipe`) kann die Leitung offen halten, nachdem das
-        // Kind selbst schon beendet ist.
-        let aus = lies_gedeckelt(child.stdout.take().ok_or("stdout pipe missing")?, deckel);
-        let err = lies_gedeckelt(child.stderr.take().ok_or("stderr pipe missing")?, deckel);
-        // stdin ebenfalls im eigenen Faden: ein Befehl, der nicht liest, liesse
-        // `write_all` sonst an der vollen Leitung haengen — vor jeder Frist.
-        if let Some(bytes) = stdin {
-            let mut pipe = child.stdin.take().ok_or("stdin pipe missing")?;
-            let bytes = bytes.to_vec();
-            std::thread::spawn(move || {
-                let _ = pipe.write_all(&bytes);
-            });
+        cmd.args(args);
+        match vantage::capture::run(&mut cmd, stdin, L::new(frist, deckel as u64)) {
+            Ok(c) => Ok(Output {
+                code: c.code,
+                stdout: c.stdout,
+                stderr: c.stderr,
+            }),
+            Err(CaptureError::Spawn(e)) => Err(format!("{program}: {e}")),
+            Err(CaptureError::TooMuchOutput { max_bytes }) => Err(format!(
+                "{program}: more than {max_bytes} bytes of output — killed, output discarded"
+            )),
+            Err(CaptureError::TimedOut { .. } | CaptureError::OutputHeldOpen { .. }) => {
+                Err(format!(
+                    "{program}: still running after {} s — killed (signoff's own limit)",
+                    frist.as_secs()
+                ))
+            }
+            Err(CaptureError::Stdin(e)) => Err(format!("{program}: stdin: {e}")),
         }
-        let beenden = |child: &mut std::process::Child, warum: String| {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(warum)
-        };
-        let abgelaufen = || {
-            format!(
-                "{program}: still running after {} s — killed (signoff's own limit)",
-                frist.as_secs()
-            )
-        };
-        let mut gelesen: [Option<Vec<u8>>; 2] = [None, None];
-        let status = loop {
-            for (slot, rx) in gelesen.iter_mut().zip([&aus, &err]) {
-                if slot.is_none()
-                    && let Ok(v) = rx.try_recv()
-                {
-                    *slot = Some(v);
-                }
-            }
-            // Der Deckel wirkt, sobald ein Strom ihn reisst — nicht erst nach
-            // dem Ende des Kindes, das an der vollen Leitung sonst bis zur
-            // Frist wartete.
-            if gelesen.iter().flatten().any(|v| v.len() > deckel) {
-                return beenden(
-                    &mut child,
-                    format!(
-                        "{program}: more than {} bytes of output — killed, output discarded",
-                        deckel
-                    ),
-                );
-            }
-            match child.try_wait().map_err(|e| format!("{program}: {e}"))? {
-                Some(s) => break s,
-                None if Instant::now() >= ende => return beenden(&mut child, abgelaufen()),
-                None => std::thread::sleep(Duration::from_millis(10)),
-            }
-        };
-        // Das Kind ist beendet; was die Faeden noch haben, kommt bis zur Frist.
-        let mut stroeme = Vec::with_capacity(2);
-        for (slot, rx) in gelesen.into_iter().zip([aus, err]) {
-            let v = match slot {
-                Some(v) => v,
-                None => rx
-                    .recv_timeout(ende.saturating_duration_since(Instant::now()))
-                    .map_err(|_| abgelaufen())?,
-            };
-            if v.len() > deckel {
-                return Err(format!(
-                    "{program}: more than {} bytes of output — output discarded",
-                    deckel
-                ));
-            }
-            stroeme.push(String::from_utf8_lossy(&v).into_owned());
-        }
-        let stderr = stroeme.pop().unwrap_or_default();
-        let stdout = stroeme.pop().unwrap_or_default();
-        Ok(Output {
-            code: status.code(),
-            stdout,
-            stderr,
-        })
     }
 }
 
@@ -267,6 +189,7 @@ impl Runner for Fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn system_runner_captures_code_stdout_and_stderr() {
